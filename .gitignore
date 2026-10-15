@@ -1,0 +1,35 @@
+# Rust build artifacts
+/target
+**/*.rs.bk
+
+# Runtime data, certificates and local configuration (do not commit)
+/data/
+/certs/
+*.local.toml
+*.db
+*.db-shm
+*.db-wal
+.env
+.env.*
+!.env.example
+
+# Dashboard frontend
+/ui/node_modules/
+/ui/dist/
+
+# Profiling artifacts
+perf.data*
+flamegraph.svg
+*.profraw
+*.profdata
+heaptrack.*
+
+# Editor and OS files
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Local tool settings
+.claude/settings.local.json
+docs/

@@ -1,0 +1,25 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.92"
+authors = ["Zero <zero9501@outlook.com>"]
+homepage = "https://github.com/zlx2019/zora"
+repository = "https://github.com/zlx2019/zora"
+license = "MIT"
+readme = "README.md"
+publish = false
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"

@@ -1,0 +1,31 @@
+# typos configuration: https://github.com/crate-ci/typos/blob/master/docs/reference.md
+
+[files]
+# Generated files are not checked.
+extend-exclude = ["CHANGELOG.md", ".git/"]
+# Hidden files are checked too, because .github/ holds the CI workflows and the templates.
+ignore-hidden = false
+# Respect .gitignore and .ignore files.
+ignore-vcs = true
+ignore-dot = true
+
+[default]
+check-filename = true
+check-file = true
+locale = "en"
+# Do not check binary files.
+binary = false
+unicode = true
+extend-ignore-re = [
+    # Escape hatches: "spellchecker:disable-line" at the end of a comment line, or a block
+    # between "spellchecker:off" and "spellchecker:on" comments.
+    "(?Rm)^.*(#|//)\\s*spellchecker:disable-line$",
+    "(?s)(#|//)\\s*spellchecker:off.*?\\n\\s*(#|//)\\s*spellchecker:on",
+]
+
+[default.extend-words]
+# Names that look like typos. Only add words here when typos actually flags them.
+# flate2 crate and DEFLATE
+flate = "flate"
+# wrk and wrk2 load generators
+wrk = "wrk"

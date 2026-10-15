@@ -1,0 +1,54 @@
+# zora
+
+[中文](README.zh-CN.md)
+
+A programmable network traffic proxy **library**, plus a ready-to-run **application** built on it. Written in Rust: gateway, multi-protocol proxy, reverse tunnels and a web dashboard.
+
+> **Status: pre-release.** zora is developed by a single maintainer. Nothing has been published yet (no crates.io release, no binaries) and everything may change without notice.
+
+## Planned scope
+
+| Pillar | What it covers |
+|---|---|
+| Gateway | Reverse proxy, forward proxy and load balancing (HTTP/1.1, HTTP/2, gRPC, WebSocket), TLS with ACME, rate limiting, health checks. The L7 engine is based on [Pingora](https://github.com/cloudflare/pingora). |
+| Proxy protocols | First batch: SOCKS5, HTTP CONNECT, Shadowsocks, Trojan, VLESS, Hysteria2. More protocols later. |
+| Reverse tunnels | Publish services that live behind NAT through the gateway. |
+| Dashboard | A web UI and an Admin API for configuration, certificates, users and traffic. |
+
+Deliverables: a set of embeddable crates (`zora-*`) and a single `zora` binary that wires them together. Configuration is a TOML file (`zora.toml`).
+
+Out of scope for now: end-user proxy clients (TUN, system proxy, client-side rule routing).
+
+## Repository layout
+
+| Path | Content |
+|---|---|
+| `crates/` | Library crates. Currently only a placeholder `zora-core`. |
+
+## Development
+
+Requirements: Rust stable (MSRV 1.92), [cargo-nextest](https://nexte.st/), [cargo-deny](https://github.com/EmbarkStudios/cargo-deny), [typos](https://github.com/crate-ci/typos) and [pre-commit](https://pre-commit.com/).
+
+```sh
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo nextest run --workspace
+cargo test --workspace --doc
+cargo deny check
+typos
+pre-commit install   # optional: run the checks as Git hooks
+```
+
+## Contributing and security
+
+- Please read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
+- Report vulnerabilities privately, see [SECURITY.md](SECURITY.md).
+- This project follows the [Code of Conduct](CODE_OF_CONDUCT.md).
+
+## License
+
+[MIT](LICENSE)
+
+## Responsible use
+
+zora is a general-purpose network proxy and gateway toolkit, intended for lawful purposes such as API gateways, reverse proxying, secure access to your own services and network research. You are responsible for complying with the laws and regulations of your jurisdiction and with the terms of the networks and services you connect to. The software is provided "as is", without warranty of any kind (see [LICENSE](LICENSE)).

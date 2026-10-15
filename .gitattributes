@@ -1,0 +1,11 @@
+# Normalize line endings to LF
+* text=auto eol=lf
+
+# Binary files
+*.png binary
+*.jpg binary
+*.ico binary
+*.woff2 binary
+
+# GitHub language stats: treat the lock file as generated
+Cargo.lock linguist-generated

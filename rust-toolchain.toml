@@ -1,0 +1,6 @@
+# Develop on the latest stable. The MSRV is declared as rust-version in the root
+# Cargo.toml and checked separately in CI.
+[toolchain]
+channel = "stable"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

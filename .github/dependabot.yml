@@ -1,0 +1,25 @@
+version: 2
+updates:
+  # Rust dependencies: weekly, with minor and patch updates grouped into one PR
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
+    # Pingora may break its API in every minor release, so upgrade it manually in a
+    # fixed window between milestones
+    ignore:
+      - dependency-name: "pingora*"
+    commit-message:
+      prefix: "chore(deps)"
+
+  # GitHub Actions: keep the hash pins while following new versions
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "ci"

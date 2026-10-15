@@ -1,0 +1,2 @@
+# Disable blank issues and steer reporters to the templates
+blank_issues_enabled: false

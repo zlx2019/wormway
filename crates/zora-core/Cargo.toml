@@ -1,0 +1,11 @@
+[package]
+name = "zora-core"
+description = "Core types for zora: configuration model, route and rule matching, and error types, with no networking framework dependencies"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

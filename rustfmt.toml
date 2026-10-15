@@ -1,0 +1,2 @@
+# Make editors that run rustfmt outside a Cargo context use the 2024 edition style too
+edition = "2024"
