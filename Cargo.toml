@@ -5,7 +5,7 @@ members = ["crates/*"]
 [workspace.package]
 version = "0.0.0"
 edition = "2024"
-rust-version = "1.92"
+rust-version = "1.98"
 authors = ["Zero <zero9501@outlook.com>"]
 homepage = "https://github.com/zlx2019/zora"
 repository = "https://github.com/zlx2019/zora"

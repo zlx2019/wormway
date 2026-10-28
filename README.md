@@ -27,7 +27,7 @@ Out of scope for now: end-user proxy clients (TUN, system proxy, client-side rul
 
 ## Development
 
-Requirements: Rust stable (MSRV 1.92), [cargo-nextest](https://nexte.st/), [cargo-deny](https://github.com/EmbarkStudios/cargo-deny), [typos](https://github.com/crate-ci/typos) and [pre-commit](https://pre-commit.com/).
+Requirements: Rust stable (MSRV 1.98), [cargo-nextest](https://nexte.st/), [cargo-deny](https://github.com/EmbarkStudios/cargo-deny), [typos](https://github.com/crate-ci/typos) and [pre-commit](https://pre-commit.com/).
 
 ```sh
 cargo fmt --all --check

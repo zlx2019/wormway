@@ -33,3 +33,4 @@ heaptrack.*
 # Local tool settings
 .claude/settings.local.json
 docs/
+poc/

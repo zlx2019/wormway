@@ -27,7 +27,7 @@
 
 ## 开发
 
-依赖：Rust stable（MSRV 1.92）、[cargo-nextest](https://nexte.st/)、[cargo-deny](https://github.com/EmbarkStudios/cargo-deny)、[typos](https://github.com/crate-ci/typos) 和 [pre-commit](https://pre-commit.com/)。
+依赖：Rust stable（MSRV 1.98）、[cargo-nextest](https://nexte.st/)、[cargo-deny](https://github.com/EmbarkStudios/cargo-deny)、[typos](https://github.com/crate-ci/typos) 和 [pre-commit](https://pre-commit.com/)。
 
 ```sh
 cargo fmt --all --check
