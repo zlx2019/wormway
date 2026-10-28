@@ -1,0 +1,299 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "AdminSettings": {
+      "additionalProperties": false,
+      "description": "The Admin API and the dashboard.",
+      "properties": {
+        "listen": {
+          "default": "127.0.0.1:9090",
+          "description": "Address of the Admin API and the dashboard.",
+          "type": "string"
+        },
+        "token_file": {
+          "default": "admin.token",
+          "description": "File holding the Admin API token, created with a random token on first start if missing.\nA relative path is resolved against `storage.data_dir`.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "Certificate": {
+      "additionalProperties": false,
+      "description": "A certificate chain and its private key, read from PEM files.",
+      "properties": {
+        "cert": {
+          "description": "PEM file with the certificate chain, leaf certificate first.",
+          "type": "string"
+        },
+        "key": {
+          "description": "PEM file with the private key.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "cert",
+        "key"
+      ],
+      "type": "object"
+    },
+    "ConfigSettings": {
+      "additionalProperties": false,
+      "description": "Where the dynamic settings come from.",
+      "properties": {
+        "source": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ConfigSource"
+            }
+          ],
+          "default": "db",
+          "description": "Source of the dynamic settings: listeners, certificates and the other entity tables."
+        }
+      },
+      "type": "object"
+    },
+    "ConfigSource": {
+      "description": "Source of the dynamic settings.",
+      "oneOf": [
+        {
+          "const": "db",
+          "description": "The database. Changes go through the Admin API or the dashboard and are kept as versions.\nDynamic settings in the configuration file are ignored.",
+          "type": "string"
+        },
+        {
+          "const": "file",
+          "description": "The configuration file. Edit it and send SIGHUP to reload; the dashboard is read-only.",
+          "type": "string"
+        }
+      ]
+    },
+    "Listener": {
+      "additionalProperties": false,
+      "description": "A set of addresses served with one protocol.",
+      "properties": {
+        "listen": {
+          "description": "Addresses to listen on, such as `[\"0.0.0.0:443\"]`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "protocol": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Protocol"
+            }
+          ],
+          "description": "Protocol served on these addresses."
+        },
+        "tls": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ListenerTls"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "TLS termination. Without it the listener serves plain TCP."
+        }
+      },
+      "required": [
+        "listen",
+        "protocol"
+      ],
+      "type": "object"
+    },
+    "ListenerTls": {
+      "additionalProperties": false,
+      "description": "TLS settings of a listener.",
+      "properties": {
+        "certificates": {
+          "description": "Names of the certificates the listener can present. The client's SNI picks one.",
+          "items": {
+            "pattern": "^[a-z0-9_-]{1,64}$",
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "certificates"
+      ],
+      "type": "object"
+    },
+    "LogFormat": {
+      "description": "Log output format.",
+      "oneOf": [
+        {
+          "const": "text",
+          "description": "Human-readable lines.",
+          "type": "string"
+        },
+        {
+          "const": "json",
+          "description": "One JSON object per line.",
+          "type": "string"
+        }
+      ]
+    },
+    "LogSettings": {
+      "additionalProperties": false,
+      "description": "Logging.",
+      "properties": {
+        "format": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/LogFormat"
+            }
+          ],
+          "default": "text",
+          "description": "Output format."
+        },
+        "level": {
+          "default": "info",
+          "description": "Log filter in `tracing` directive syntax, such as `\"info\"` or `\"info,zora_runtime=debug\"`.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "Protocol": {
+      "description": "Protocol served by a listener.",
+      "oneOf": [
+        {
+          "const": "http",
+          "description": "HTTP/1.1 and HTTP/2, served by the gateway.",
+          "type": "string"
+        }
+      ]
+    },
+    "ServerSettings": {
+      "additionalProperties": false,
+      "description": "Process settings.",
+      "properties": {
+        "shutdown_timeout": {
+          "default": "30s",
+          "description": "How long open connections may take to finish after a shutdown signal.",
+          "pattern": "^([0-9]+(ms|s|m|h|d))+$",
+          "type": "string"
+        },
+        "threads": {
+          "default": 0,
+          "description": "Worker threads of the data plane. `0` starts one per CPU core.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "StorageSettings": {
+      "additionalProperties": false,
+      "description": "Where zora keeps its database and runtime state.",
+      "properties": {
+        "data_dir": {
+          "default": "data",
+          "description": "Directory for the database and runtime state. A relative path is resolved against the\ndirectory of the configuration file.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "description": "The configuration file, `zora.toml`.",
+  "properties": {
+    "admin": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/AdminSettings"
+        }
+      ],
+      "default": {
+        "listen": "127.0.0.1:9090",
+        "token_file": "admin.token"
+      },
+      "description": "The Admin API and the dashboard. Static: a restart applies changes."
+    },
+    "certificates": {
+      "additionalProperties": false,
+      "default": {},
+      "description": "TLS certificates by name. Dynamic: read from this file only when `config.source` is\n`\"file\"`.",
+      "patternProperties": {
+        "^[a-z0-9_-]{1,64}$": {
+          "$ref": "#/definitions/Certificate"
+        }
+      },
+      "type": "object"
+    },
+    "config": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/ConfigSettings"
+        }
+      ],
+      "default": {
+        "source": "db"
+      },
+      "description": "Where the dynamic settings come from. Static: a restart applies changes."
+    },
+    "listeners": {
+      "additionalProperties": false,
+      "default": {},
+      "description": "Listeners by name. Dynamic: read from this file only when `config.source` is `\"file\"`.",
+      "patternProperties": {
+        "^[a-z0-9_-]{1,64}$": {
+          "$ref": "#/definitions/Listener"
+        }
+      },
+      "type": "object"
+    },
+    "log": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/LogSettings"
+        }
+      ],
+      "default": {
+        "format": "text",
+        "level": "info"
+      },
+      "description": "Logging. Static: a restart applies changes."
+    },
+    "server": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/ServerSettings"
+        }
+      ],
+      "default": {
+        "shutdown_timeout": "30s",
+        "threads": 0
+      },
+      "description": "Process settings. Static: a restart applies changes."
+    },
+    "storage": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/StorageSettings"
+        }
+      ],
+      "default": {
+        "data_dir": "data"
+      },
+      "description": "Where zora keeps its database and runtime state. Static: a restart applies changes."
+    },
+    "version": {
+      "const": 1,
+      "description": "Version of the configuration format. This build reads version 1.",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "version"
+  ],
+  "title": "zora configuration",
+  "type": "object"
+}

@@ -1,0 +1,41 @@
+#:schema ./zora.schema.json
+# Example zora configuration. Only `version` is required. The values shown for [server], [log],
+# [admin] and [storage] are the defaults.
+
+version = 1
+
+# ---- Static settings: a restart applies changes ----
+
+[server]
+threads = 0                 # data-plane worker threads, 0 = one per CPU core
+shutdown_timeout = "30s"    # how long open connections may take to finish on shutdown
+
+[log]
+level = "info"              # tracing directives, such as "info,zora_runtime=debug"
+format = "text"             # text | json
+
+[admin]
+listen = "127.0.0.1:9090"   # Admin API and dashboard
+token_file = "admin.token"  # relative to storage.data_dir, created on first start if missing
+
+[storage]
+data_dir = "data"           # relative to the directory of this file
+
+[config]
+source = "file"             # db (default): dynamic settings live in the database
+                            # file: dynamic settings are read from this file
+
+# ---- Dynamic settings: read from this file only when config.source = "file" ----
+
+[listeners.web]
+listen = ["0.0.0.0:8080"]
+protocol = "http"
+
+[listeners.websecure]
+listen = ["0.0.0.0:8443"]
+protocol = "http"
+tls = { certificates = ["example"] }
+
+[certificates.example]
+cert = "certs/example.crt"
+key = "certs/example.key"

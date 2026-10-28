@@ -23,7 +23,10 @@
 
 | 路径 | 内容 |
 |---|---|
-| `crates/` | 库 crate。目前只有占位的 `zora-core`。 |
+| `zora-*/` | 库 crate，每个一个目录。`zora-core` 是配置模型。 |
+| `apps/zora/` | `zora` 二进制。目前有 `zora check`（校验配置文件）和 `zora schema`。 |
+| `zora.example.toml` | 示例配置。 |
+| `zora.schema.json` | 配置文件的 JSON Schema，由 `zora schema` 生成。编辑器用它补全和校验，例如 VS Code 装上 Even Better TOML 后，示例开头的 `#:schema` 一行即可生效。 |
 
 ## 开发
 
