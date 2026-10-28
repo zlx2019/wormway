@@ -10,7 +10,8 @@ mod server;
 mod service;
 mod snapshot;
 mod socket;
+mod telemetry;
 
-pub use server::{ApplyError, Server};
+pub use server::{ApplyError, Prepared, Server};
 pub use service::{BoxError, BoxFuture, Connection, Service, ServiceFactory, Services, Shutdown};
 pub use snapshot::Snapshot;

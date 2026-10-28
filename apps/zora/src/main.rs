@@ -12,6 +12,8 @@ use clap::{Args, Parser, Subcommand};
 
 /// Environment variable that sets the configuration file path.
 const CONFIG_ENV: &str = "ZORA_CONFIG";
+/// Environment variable that sets the Admin API token instead of the token file.
+const ADMIN_TOKEN_ENV: &str = "ZORA_ADMIN_TOKEN";
 /// Configuration file used when neither `--config` nor the environment variable is set.
 const DEFAULT_CONFIG: &str = "zora.toml";
 

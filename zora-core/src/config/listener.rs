@@ -17,6 +17,7 @@ pub struct Listener {
     /// Protocol served on these addresses.
     pub protocol: Protocol,
     /// TLS termination. Without it the listener serves plain TCP.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tls: Option<ListenerTls>,
 }
 

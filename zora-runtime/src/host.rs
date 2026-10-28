@@ -3,6 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use metrics::{Counter, Gauge};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -10,6 +11,7 @@ use tracing::{info, warn};
 use zora_core::config::Name;
 
 use crate::service::{Connection, Service};
+use crate::telemetry;
 
 /// A service, the connections it serves and the signals that end them.
 pub(crate) struct Host {
@@ -23,12 +25,19 @@ pub(crate) struct Host {
     connections: TaskTracker,
     /// Ends the connections that outlive the shutdown timeout.
     kill: CancellationToken,
+    /// Counts the connections accepted for the listener.
+    accepted: Counter,
+    /// Tracks the connections open on the listener.
+    active: Gauge,
 }
 
 impl Host {
     /// Wraps a newly built service.
     pub(crate) fn new(name: Name, service: Arc<dyn Service>) -> Self {
+        let (accepted, active) = telemetry::connections(&name);
         Self {
+            accepted,
+            active,
             name,
             service,
             shutdown: watch::channel(false).0,
@@ -41,12 +50,16 @@ impl Host {
     pub(crate) fn spawn(&self, conn: Connection) {
         let serve = self.service.clone().serve(conn, self.shutdown.subscribe());
         let kill = self.kill.clone();
+        let active = self.active.clone();
+        self.accepted.increment(1);
+        active.increment(1.0);
         self.connections.spawn(async move {
             // Dropping the service future closes the connection.
             tokio::select! {
                 () = serve => {}
                 () = kill.cancelled() => {}
             }
+            active.decrement(1.0);
         });
     }
 

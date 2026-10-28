@@ -4,18 +4,20 @@
 use std::collections::BTreeMap;
 use std::io;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::Arc;
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use tokio::runtime::Handle;
+use tokio::sync::{Mutex, MutexGuard};
 use tokio_util::task::TaskTracker;
 use zora_core::config::{Config, ConfigError, Listener, Name, Protocol};
 
 use crate::host::Host;
-use crate::service::{BoxError, Services};
+use crate::service::{BoxError, ServiceFactory, Services};
 use crate::snapshot::Snapshot;
 use crate::socket::{self, Bound, Socket};
+use crate::telemetry;
 
 /// Runs the listeners of a configuration and switches to new configurations without dropping
 /// connections.
@@ -26,7 +28,7 @@ pub struct Server {
     services: Services,
     /// How long connections may take to finish when their service drains.
     shutdown_timeout: Duration,
-    /// The running listeners. Held while a configuration is applied, so applies do not overlap.
+    /// The running listeners. Held from `prepare` to `commit`, so changes do not overlap.
     state: Mutex<State>,
     /// The configuration in effect.
     snapshot: ArcSwap<Snapshot>,
@@ -41,9 +43,11 @@ struct State {
     hosts: BTreeMap<Name, (Listener, Arc<Host>)>,
     /// Sockets of all listeners, in listener order.
     sockets: Vec<Socket>,
+    /// Set by `shutdown`; later changes are refused.
+    closed: bool,
 }
 
-/// The changes of one apply, prepared without touching anything that runs.
+/// The changes of one switch, prepared without touching anything that runs.
 struct Plan {
     /// Services of the new configuration: reused ones for unchanged listeners, new ones for the
     /// others.
@@ -62,7 +66,12 @@ enum Planned {
 
 impl Server {
     /// Starts serving `config` with connections handled on the runtime of `handle`.
-    pub fn start(handle: Handle, services: Services, config: Config) -> Result<Self, ApplyError> {
+    pub async fn start(
+        handle: Handle,
+        services: Services,
+        config: Config,
+    ) -> Result<Self, ApplyError> {
+        telemetry::describe();
         let server = Self {
             handle,
             services,
@@ -75,11 +84,34 @@ impl Server {
             }),
             draining: TaskTracker::new(),
         };
-        server.apply(config)?;
+        server.apply(config).await?;
         Ok(server)
     }
 
-    /// Switches to `config` and returns its snapshot.
+    /// Checks that `config` could be applied: its validation rules hold and every protocol it
+    /// uses is available. Addresses are not bound, so binding can still fail later.
+    pub fn validate(&self, config: &Config) -> Result<(), ApplyError> {
+        config.validate().map_err(ConfigError::Invalid)?;
+        for (name, listener) in &config.listeners {
+            self.factory(name, listener.protocol)?;
+        }
+        Ok(())
+    }
+
+    /// Prepares the switch to `config`: validates it, builds the services of new and changed
+    /// listeners and binds the new addresses. Nothing running changes before
+    /// [`Prepared::commit`], and dropping the result discards it. Other changes wait until
+    /// then.
+    pub async fn prepare(&self, config: Config) -> Result<Prepared<'_>, ApplyError> {
+        let prepared = self.try_prepare(config).await;
+        if prepared.is_err() {
+            telemetry::config_applied(false);
+        }
+        prepared
+    }
+
+    /// Switches to `config` and returns its snapshot: [`Server::prepare`], then
+    /// [`Prepared::commit`].
     ///
     /// Unchanged listeners keep running untouched. Changed and removed listeners drain: their
     /// old services are told so before this returns, and their open connections stay with them
@@ -87,17 +119,8 @@ impl Server {
     /// socket, so no connection is refused during the switch. On error nothing changes.
     ///
     /// Static settings keep the values given to [`Server::start`].
-    pub fn apply(&self, config: Config) -> Result<Arc<Snapshot>, ApplyError> {
-        config.validate().map_err(ConfigError::Invalid)?;
-        let mut state = lock(&self.state);
-        let plan = self.plan(&state, &config.listeners)?;
-        let snapshot = Arc::new(Snapshot {
-            version: self.snapshot.load().version + 1,
-            config,
-        });
-        self.snapshot.store(snapshot.clone());
-        self.commit(&mut state, plan);
-        Ok(snapshot)
+    pub async fn apply(&self, config: Config) -> Result<Arc<Snapshot>, ApplyError> {
+        Ok(self.prepare(config).await?.commit())
     }
 
     /// Returns the configuration in effect.
@@ -106,8 +129,8 @@ impl Server {
     }
 
     /// Returns the bound addresses of every listener.
-    pub fn listeners(&self) -> BTreeMap<Name, Vec<SocketAddr>> {
-        let state = lock(&self.state);
+    pub async fn listeners(&self) -> BTreeMap<Name, Vec<SocketAddr>> {
+        let state = self.state.lock().await;
         let mut listeners: BTreeMap<Name, Vec<SocketAddr>> = state
             .hosts
             .keys()
@@ -122,10 +145,11 @@ impl Server {
     }
 
     /// Stops accepting on every listener and drains every service. Connections still open when
-    /// the shutdown timeout ends are closed. Do not apply configurations afterwards.
+    /// the shutdown timeout ends are closed. Later changes are refused.
     pub async fn shutdown(&self) {
         {
-            let mut state = lock(&self.state);
+            let mut state = self.state.lock().await;
+            state.closed = true;
             for socket in state.sockets.drain(..) {
                 socket.close();
             }
@@ -135,6 +159,22 @@ impl Server {
         }
         self.draining.close();
         self.draining.wait().await;
+    }
+
+    /// Validates `config` and plans the switch to it while holding the state.
+    async fn try_prepare(&self, config: Config) -> Result<Prepared<'_>, ApplyError> {
+        self.validate(&config)?;
+        let state = self.state.lock().await;
+        if state.closed {
+            return Err(ApplyError::ShuttingDown);
+        }
+        let plan = self.plan(&state, &config.listeners)?;
+        Ok(Prepared {
+            server: self,
+            state,
+            plan,
+            config,
+        })
     }
 
     /// Builds the services and binds the sockets that `listeners` needs. Running listeners are
@@ -183,16 +223,24 @@ impl Server {
         Ok(Plan { hosts, sockets })
     }
 
+    /// Returns the service factory for `protocol`, which listener `name` uses.
+    fn factory(
+        &self,
+        name: &Name,
+        protocol: Protocol,
+    ) -> Result<&Arc<dyn ServiceFactory>, ApplyError> {
+        self.services
+            .get(protocol)
+            .ok_or_else(|| ApplyError::Unsupported {
+                listener: name.clone(),
+                protocol,
+            })
+    }
+
     /// Builds the service of `listener` with the factory of its protocol.
     fn new_host(&self, name: &Name, listener: &Listener) -> Result<Host, ApplyError> {
-        let factory =
-            self.services
-                .get(listener.protocol)
-                .ok_or_else(|| ApplyError::Unsupported {
-                    listener: name.clone(),
-                    protocol: listener.protocol,
-                })?;
-        let service = factory
+        let service = self
+            .factory(name, listener.protocol)?
             .create(name, listener)
             .map_err(|source| ApplyError::Service {
                 listener: name.clone(),
@@ -253,7 +301,7 @@ impl Drop for Server {
     /// Stops accepting if [`Server::shutdown`] was not called. Open connections keep running
     /// until they end or their runtime shuts down.
     fn drop(&mut self) {
-        for socket in &lock(&self.state).sockets {
+        for socket in &self.state.get_mut().sockets {
             socket.close();
         }
     }
@@ -265,10 +313,37 @@ const _: () = {
     assert_send_sync::<Server>();
 };
 
-/// Locks `mutex` even if a panic poisoned it. The state stays consistent: `plan`, which runs
-/// the service factories, does not modify it.
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+/// A configuration ready to switch to, from [`Server::prepare`]. Nothing running has changed
+/// yet: dropping it discards the new services and sockets.
+pub struct Prepared<'a> {
+    /// The server to switch.
+    server: &'a Server,
+    /// Keeps other changes out until this one is committed or dropped.
+    state: MutexGuard<'a, State>,
+    /// What to change.
+    plan: Plan,
+    /// The configuration to switch to.
+    config: Config,
+}
+
+impl Prepared<'_> {
+    /// Switches to the configuration and returns its snapshot. It cannot fail.
+    pub fn commit(self) -> Arc<Snapshot> {
+        let Self {
+            server,
+            mut state,
+            plan,
+            config,
+        } = self;
+        let snapshot = Arc::new(Snapshot {
+            version: server.snapshot.load().version + 1,
+            config,
+        });
+        server.snapshot.store(snapshot.clone());
+        server.commit(&mut state, plan);
+        telemetry::config_applied(true);
+        snapshot
+    }
 }
 
 /// Why a configuration could not be applied. The configuration in effect stays.
@@ -305,4 +380,7 @@ pub enum ApplyError {
         #[source]
         source: io::Error,
     },
+    /// The server is shutting down and takes no more changes.
+    #[error("the server is shutting down")]
+    ShuttingDown,
 }

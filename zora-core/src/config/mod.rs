@@ -90,30 +90,49 @@ impl Config {
         validate::warnings(self)
     }
 
-    /// Takes the dynamic settings of `other` and keeps the static ones. Reloads use it, since
-    /// static settings only change on restart.
-    pub fn replace_dynamic(&mut self, other: Config) {
-        // Keep in sync with the dynamic fields of `Config`.
-        self.listeners = other.listeners;
-        self.certificates = other.certificates;
+    /// Returns a copy of the dynamic settings.
+    pub fn dynamic(&self) -> DynamicConfig {
+        self.clone().into_dynamic()
     }
 
-    /// Removes every dynamic setting.
-    pub fn clear_dynamic(&mut self) {
+    /// Takes the dynamic settings out, dropping the static ones.
+    pub fn into_dynamic(self) -> DynamicConfig {
         // Keep in sync with the dynamic fields of `Config`.
-        self.listeners.clear();
-        self.certificates.clear();
+        DynamicConfig {
+            listeners: self.listeners,
+            certificates: self.certificates,
+        }
+    }
+
+    /// Replaces the dynamic settings and keeps the static ones.
+    pub fn set_dynamic(&mut self, dynamic: DynamicConfig) {
+        // Keep in sync with the dynamic fields of `Config`.
+        self.listeners = dynamic.listeners;
+        self.certificates = dynamic.certificates;
     }
 
     /// Whether `other` has the same static settings.
     pub fn same_static(&self, other: &Config) -> bool {
         let without_dynamic = |config: &Config| {
             let mut config = config.clone();
-            config.clear_dynamic();
+            config.set_dynamic(DynamicConfig::default());
             config
         };
         without_dynamic(self) == without_dynamic(other)
     }
+}
+
+/// The dynamic settings: the entity tables that can change while zora runs. The database
+/// stores them and the Admin API exchanges them as JSON.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DynamicConfig {
+    /// Listeners by name.
+    #[serde(default)]
+    pub listeners: BTreeMap<Name, Listener>,
+    /// TLS certificates by name.
+    #[serde(default)]
+    pub certificates: BTreeMap<Name, Certificate>,
 }
 
 /// The part of the file read before everything else; other keys are ignored here.
@@ -346,13 +365,24 @@ mod tests {
         assert!(!running.same_static(&file));
 
         let mut next = running.clone();
-        next.replace_dynamic(file.clone());
+        next.set_dynamic(file.dynamic());
         assert_eq!(next.server.threads, 2);
         assert_eq!(next.listeners, file.listeners);
         assert!(next.same_static(&running));
+        assert_eq!(next.clone().into_dynamic(), file.into_dynamic());
 
-        next.clear_dynamic();
+        next.set_dynamic(DynamicConfig::default());
         assert_eq!(next, running);
+    }
+
+    /// The dynamic settings travel as JSON with the same keys as the file, and unknown keys are
+    /// rejected there too.
+    #[test]
+    fn dynamic_settings_round_trip_through_json() {
+        let json = r#"{"listeners":{"web":{"listen":["127.0.0.1:8080"],"protocol":"http"}},"certificates":{}}"#;
+        let dynamic: DynamicConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(serde_json::to_string(&dynamic).unwrap(), json);
+        assert!(serde_json::from_str::<DynamicConfig>(r#"{"routes":{}}"#).is_err());
     }
 
     /// Validation problems come back together, after parsing succeeds.

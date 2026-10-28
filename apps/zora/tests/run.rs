@@ -1,7 +1,9 @@
-//! End-to-end tests of `zora run`: startup, reload on SIGHUP and shutdown on SIGINT or SIGTERM.
+//! End-to-end tests of `zora run`: startup, the Admin API, reload on SIGHUP and shutdown on
+//! SIGINT or SIGTERM.
 #![cfg(unix)]
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
@@ -10,14 +12,48 @@ use std::time::{Duration, Instant};
 /// How long to wait for a log line or for the process to exit.
 const PATIENCE: Duration = Duration::from_secs(10);
 
-/// File mode without listeners: starts with every binary build.
-const EMPTY: &str = "version = 1\n[config]\nsource = \"file\"\n";
+/// The Admin API on any free port, so that tests can run side by side.
+const ADMIN: &str = "[admin]\nlisten = \"127.0.0.1:0\"\n";
 
-/// Writes `text` to a file named `name` in Cargo's temporary directory for tests.
+/// File mode without listeners: starts with every binary build.
+const EMPTY: &str = "version = 1\n[config]\nsource = \"file\"\n[admin]\nlisten = \"127.0.0.1:0\"\n";
+
+/// Writes `text` as `zora.toml` into a fresh directory named `name` in Cargo's temporary
+/// directory for tests, and returns the path of the file. The data directory goes next to it.
 fn temp_config(name: &str, text: &str) -> PathBuf {
-    let path = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create the test directory");
+    let path = dir.join("zora.toml");
     std::fs::write(&path, text).expect("write the test configuration");
     path
+}
+
+/// Sends `GET path` with an optional token to the Admin API at `addr`, and returns the status
+/// code and the body.
+fn get(addr: &str, path: &str, token: Option<&str>) -> (u16, String) {
+    let mut stream = TcpStream::connect(addr).expect("connect to the Admin API");
+    let authorization = token
+        .map(|token| format!("Authorization: Bearer {token}\r\n"))
+        .unwrap_or_default();
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: zora\r\n{authorization}Connection: close\r\n\r\n"
+    )
+    .expect("send the request");
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .expect("read the response");
+    let status = response
+        .get(9..12)
+        .and_then(|code| code.parse().ok())
+        .expect("status code");
+    let body = response
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body.to_owned())
+        .unwrap_or_default();
+    (status, body)
 }
 
 /// A `zora run` process and its log lines.
@@ -33,10 +69,17 @@ struct Zora {
 impl Zora {
     /// Starts `zora run` with the configuration file at `path`.
     fn start(path: &Path) -> Self {
+        Self::start_with_env(path, &[])
+    }
+
+    /// Starts `zora run` with the configuration file at `path` and extra environment variables.
+    fn start_with_env(path: &Path, env: &[(&str, &str)]) -> Self {
         let mut child = Command::new(env!("CARGO_BIN_EXE_zora"))
             .args(["run", "-c"])
             .arg(path)
             .env_remove("ZORA_CONFIG")
+            .env_remove("ZORA_ADMIN_TOKEN")
+            .envs(env.iter().copied())
             .stderr(Stdio::piped())
             .spawn()
             .expect("start zora");
@@ -72,6 +115,14 @@ impl Zora {
         }
     }
 
+    /// Waits until the Admin API listens and returns its address.
+    fn admin_addr(&mut self) -> String {
+        let line = self.wait_for("Admin API listening");
+        line.split_once("addr=")
+            .map(|(_, addr)| addr.trim().to_owned())
+            .expect("address in the log line")
+    }
+
     /// Sends the signal `name`, such as `HUP` or `TERM`.
     fn signal(&self, name: &str) {
         let status = Command::new("kill")
@@ -105,7 +156,7 @@ impl Drop for Zora {
 /// `zora run` starts and stops cleanly on SIGTERM.
 #[test]
 fn stops_on_sigterm() {
-    let mut zora = Zora::start(&temp_config("run-sigterm.toml", EMPTY));
+    let mut zora = Zora::start(&temp_config("run-sigterm", EMPTY));
     zora.wait_for("zora is ready");
     zora.signal("TERM");
     zora.wait_for("stopped");
@@ -116,7 +167,7 @@ fn stops_on_sigterm() {
 /// changed static settings are only reported.
 #[test]
 fn reloads_on_sighup() {
-    let path = temp_config("run-sighup.toml", EMPTY);
+    let path = temp_config("run-sighup", EMPTY);
     let mut zora = Zora::start(&path);
     zora.wait_for("zora is ready");
 
@@ -139,7 +190,7 @@ fn reloads_on_sighup() {
 #[test]
 fn rejects_unavailable_protocols() {
     let listener = "[listeners.web]\nlisten = [\"127.0.0.1:0\"]\nprotocol = \"http\"\n";
-    let mut zora = Zora::start(&temp_config("run-http.toml", &format!("{EMPTY}{listener}")));
+    let mut zora = Zora::start(&temp_config("run-http", &format!("{EMPTY}{listener}")));
     zora.wait_for("listener web: protocol http is not available in this build");
     assert_eq!(zora.exit_code(), Some(1));
 }
@@ -147,12 +198,52 @@ fn rejects_unavailable_protocols() {
 /// An invalid file is reported like `zora check` does, before anything starts.
 #[test]
 fn reports_invalid_files() {
-    let path = temp_config(
-        "run-invalid.toml",
-        "version = 1\n[log]\nlevel = \"info,=x=\"\n",
-    );
+    let path = temp_config("run-invalid", "version = 1\n[log]\nlevel = \"info,=x=\"\n");
     let mut zora = Zora::start(&path);
     let line = zora.wait_for("error: log.level: invalid filter directive");
     assert!(line.starts_with(&path.display().to_string()), "{line}");
     assert_eq!(zora.exit_code(), Some(1));
+}
+
+/// The Admin API answers health checks without a token and everything else with it. The token
+/// file is created on first start, readable by its owner only.
+#[test]
+fn serves_the_admin_api() {
+    let path = temp_config("run-admin", &format!("version = 1\n{ADMIN}"));
+    let mut zora = Zora::start(&path);
+    let addr = zora.admin_addr();
+    zora.wait_for("zora is ready");
+
+    assert_eq!(get(&addr, "/healthz", None).0, 200);
+    assert_eq!(get(&addr, "/api/v1/status", None).0, 401);
+    let token_file = path.with_file_name("data").join("admin.token");
+    let token = std::fs::read_to_string(&token_file).expect("token file");
+    let (status, body) = get(&addr, "/api/v1/status", Some(token.trim()));
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains(r#""source":"db""#), "{body}");
+    let (status, body) = get(&addr, "/metrics", Some(token.trim()));
+    assert_eq!(status, 200);
+    assert!(body.contains("zora_build_info"), "{body}");
+
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(&token_file)
+        .expect("metadata")
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600);
+
+    zora.signal("TERM");
+    assert_eq!(zora.exit_code(), Some(0));
+}
+
+/// `ZORA_ADMIN_TOKEN` replaces the token file.
+#[test]
+fn takes_the_token_from_the_environment() {
+    let path = temp_config("run-admin-env", &format!("version = 1\n{ADMIN}"));
+    let mut zora = Zora::start_with_env(&path, &[("ZORA_ADMIN_TOKEN", "from-env")]);
+    let addr = zora.admin_addr();
+    assert_eq!(get(&addr, "/api/v1/status", Some("from-env")).0, 200);
+    assert!(!path.with_file_name("data").join("admin.token").exists());
+    zora.signal("TERM");
+    assert_eq!(zora.exit_code(), Some(0));
 }

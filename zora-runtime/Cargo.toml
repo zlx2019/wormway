@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 arc-swap.workspace = true
+metrics.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt", "sync", "time"] }
 tokio-util = { workspace = true, features = ["rt"] }
