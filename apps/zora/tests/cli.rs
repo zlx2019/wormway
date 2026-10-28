@@ -90,7 +90,7 @@ source = "file"
 listen = []
 protocol = "http"
 [listeners.b]
-listen = ["127.0.0.1:9090"]
+listen = ["127.0.0.1:9872"]
 protocol = "http"
 tls = { certificates = ["missing"] }
 "#,
@@ -101,7 +101,7 @@ tls = { certificates = ["missing"] }
     let expected = format!(
         "{file}: error: listeners.a.listen: must list at least one address
 {file}: error: listeners.b.tls.certificates[0]: unknown certificate \"missing\"
-{file}: error: listeners.b.listen[0]: 127.0.0.1:9090 overlaps admin.listen (127.0.0.1:9090)
+{file}: error: listeners.b.listen[0]: 127.0.0.1:9872 overlaps admin.listen (127.0.0.1:9872)
 {file}: 3 error(s)
 "
     );

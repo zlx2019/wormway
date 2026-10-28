@@ -15,7 +15,7 @@ level = "info"              # tracing directives, such as "info,zora_runtime=deb
 format = "text"             # text | json
 
 [admin]
-listen = "127.0.0.1:9090"   # Admin API and dashboard
+listen = "127.0.0.1:9872"   # Admin API and dashboard
 token_file = "admin.token"  # relative to storage.data_dir, created on first start if missing
 
 [storage]

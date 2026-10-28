@@ -112,7 +112,7 @@ mod tests {
             protocol = "http"
             tls = { certificates = [] }
             [listeners.b]
-            listen = ["127.0.0.1:9090"]
+            listen = ["127.0.0.1:9872"]
             protocol = "http"
             tls = { certificates = ["missing", "present"] }
             [certificates.present]
@@ -133,7 +133,7 @@ mod tests {
         assert_eq!(issues[2].message, "unknown certificate \"missing\"");
         assert_eq!(
             issues[3].message,
-            "127.0.0.1:9090 overlaps admin.listen (127.0.0.1:9090)"
+            "127.0.0.1:9872 overlaps admin.listen (127.0.0.1:9872)"
         );
     }
 

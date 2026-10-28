@@ -193,7 +193,7 @@ mod tests {
             std::time::Duration::from_secs(30)
         );
         assert_eq!(config.log.format, LogFormat::Text);
-        assert_eq!(config.admin.listen, "127.0.0.1:9090".parse().unwrap());
+        assert_eq!(config.admin.listen, "127.0.0.1:9872".parse().unwrap());
         assert_eq!(config.config.source, ConfigSource::Db);
         assert!(config.listeners.is_empty() && config.certificates.is_empty());
     }
@@ -300,7 +300,7 @@ mod tests {
             "{error}"
         );
 
-        let error = parse_error("version = 1\n[admin]\nlisten = \"localhost:9090\"\n");
+        let error = parse_error("version = 1\n[admin]\nlisten = \"localhost:9872\"\n");
         assert_eq!(error.position, at(3, 10));
 
         let error = parse_error("version = 1\n[listeners.Web]\nlisten = []\nprotocol = \"http\"\n");

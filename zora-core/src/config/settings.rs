@@ -74,10 +74,10 @@ pub struct AdminSettings {
 }
 
 impl Default for AdminSettings {
-    /// Loopback port 9090, token in `admin.token`.
+    /// Loopback port 9872, token in `admin.token`.
     fn default() -> Self {
         Self {
-            listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 9090)),
+            listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 9872)),
             token_file: PathBuf::from("admin.token"),
         }
     }
