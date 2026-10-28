@@ -1,5 +1,6 @@
 //! Listeners: the addresses that accept connections, and the protocol served on them.
 
+use std::fmt;
 use std::net::SocketAddr;
 
 use serde::{Deserialize, Serialize};
@@ -20,12 +21,21 @@ pub struct Listener {
 }
 
 /// Protocol served by a listener.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum Protocol {
     /// HTTP/1.1 and HTTP/2, served by the gateway.
     Http,
+}
+
+impl fmt::Display for Protocol {
+    /// Writes the name used in the configuration file, such as `http`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Http => "http",
+        })
+    }
 }
 
 /// TLS settings of a listener.

@@ -176,7 +176,7 @@
       "properties": {
         "shutdown_timeout": {
           "default": "30s",
-          "description": "How long open connections may take to finish after a shutdown signal.",
+          "description": "How long open connections may take to finish when zora shuts down or their listener is\nchanged or removed. Connections still open after that are closed.",
           "pattern": "^([0-9]+(ms|s|m|h|d))+$",
           "type": "string"
         },

@@ -14,7 +14,8 @@ use super::Duration;
 pub struct ServerSettings {
     /// Worker threads of the data plane. `0` starts one per CPU core.
     pub threads: usize,
-    /// How long open connections may take to finish after a shutdown signal.
+    /// How long open connections may take to finish when zora shuts down or their listener is
+    /// changed or removed. Connections still open after that are closed.
     pub shutdown_timeout: Duration,
 }
 

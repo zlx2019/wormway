@@ -89,6 +89,31 @@ impl Config {
     pub fn warnings(&self) -> Vec<Issue> {
         validate::warnings(self)
     }
+
+    /// Takes the dynamic settings of `other` and keeps the static ones. Reloads use it, since
+    /// static settings only change on restart.
+    pub fn replace_dynamic(&mut self, other: Config) {
+        // Keep in sync with the dynamic fields of `Config`.
+        self.listeners = other.listeners;
+        self.certificates = other.certificates;
+    }
+
+    /// Removes every dynamic setting.
+    pub fn clear_dynamic(&mut self) {
+        // Keep in sync with the dynamic fields of `Config`.
+        self.listeners.clear();
+        self.certificates.clear();
+    }
+
+    /// Whether `other` has the same static settings.
+    pub fn same_static(&self, other: &Config) -> bool {
+        let without_dynamic = |config: &Config| {
+            let mut config = config.clone();
+            config.clear_dynamic();
+            config
+        };
+        without_dynamic(self) == without_dynamic(other)
+    }
 }
 
 /// The part of the file read before everything else; other keys are ignored here.
@@ -309,6 +334,25 @@ mod tests {
 
         let error = parse_error("version = 1\n[log]\nformat = \"xml\"\n");
         assert_eq!(error.position, at(3, 10));
+    }
+
+    /// Dynamic settings can be swapped or cleared while the static ones stay.
+    #[test]
+    fn separates_static_and_dynamic_settings() {
+        let web = "[listeners.web]\nlisten = [\"127.0.0.1:8080\"]\nprotocol = \"http\"\n";
+        let running = Config::from_toml("version = 1\n[server]\nthreads = 2\n").unwrap();
+        let file =
+            Config::from_toml(&format!("version = 1\n[server]\nthreads = 4\n{web}")).unwrap();
+        assert!(!running.same_static(&file));
+
+        let mut next = running.clone();
+        next.replace_dynamic(file.clone());
+        assert_eq!(next.server.threads, 2);
+        assert_eq!(next.listeners, file.listeners);
+        assert!(next.same_static(&running));
+
+        next.clear_dynamic();
+        assert_eq!(next, running);
     }
 
     /// Validation problems come back together, after parsing succeeds.
