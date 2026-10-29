@@ -7,7 +7,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use wormway_core::config::{Config, HealthCheckKind, Issue, Name, Protocol, Upstream};
 use wormway_core::routing::{Request, Router};
-use wormway_runtime::{BoxFuture, Engine, Staged};
+use wormway_runtime::{BoxFuture, Engine, HealthReport, Staged, UpstreamReport};
 use wormway_tls::Certificates;
 
 use crate::health::UpstreamHealth;
@@ -38,6 +38,14 @@ impl GatewaySnapshot {
         request: &Request<'_>,
     ) -> Option<&Arc<CompiledRoute>> {
         self.routers.get(listener)?.find(request)
+    }
+
+    /// Returns the upstreams in name order, with the health of their targets.
+    fn report(&self) -> Vec<UpstreamReport> {
+        self.upstreams
+            .values()
+            .map(|upstream| upstream.runtime.report())
+            .collect()
     }
 
     /// Compiles `config`, reusing the upstream runtimes of `self` whose targets, balancing and
@@ -197,6 +205,16 @@ impl Engine for Routing {
             });
             Ok(staged)
         })
+    }
+}
+
+/// Reports the health of the upstreams of the snapshot in effect.
+pub(crate) struct Report(pub(crate) Arc<ArcSwap<GatewaySnapshot>>);
+
+impl HealthReport for Report {
+    /// Returns the upstreams of the snapshot in effect.
+    fn upstreams(&self) -> Vec<UpstreamReport> {
+        self.0.load().report()
     }
 }
 

@@ -2,6 +2,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::{Duration, UNIX_EPOCH};
 
 use axum::Router;
 use axum::body::Body;
@@ -13,9 +14,10 @@ use tokio::net::TcpStream;
 use tokio::runtime::Handle;
 use tower::ServiceExt;
 use wormway_control::{Admin, AdminToken, Metrics, Store};
-use wormway_core::config::{Config, Listener, Name, Protocol};
+use wormway_core::config::{Config, HealthCheckKind, Listener, Name, Protocol};
 use wormway_runtime::{
-    BoxError, BoxFuture, Connection, Server, Service, ServiceFactory, Services, Shutdown,
+    BoxError, BoxFuture, Connection, HealthReport, Server, Service, ServiceFactory, Services,
+    Shutdown, TargetReport, TargetState, UpstreamReport,
 };
 
 /// Token of the Admin API in these tests.
@@ -38,6 +40,58 @@ impl ServiceFactory for Hello {
     /// Every listener gets the same kind of service.
     fn create(&self, _: &Name, _: &Listener) -> Result<Arc<dyn Service>, BoxError> {
         Ok(Arc::new(Hello))
+    }
+}
+
+/// Reports an upstream with a target in each state and one without checks, at fixed times.
+struct Report;
+
+impl HealthReport for Report {
+    /// Returns the same upstreams every time.
+    fn upstreams(&self) -> Vec<UpstreamReport> {
+        let at = |secs| Some(UNIX_EPOCH + Duration::from_secs(secs));
+        let target = |address: &str, state, since, reason: Option<&str>| TargetReport {
+            address: address.parse().expect("address"),
+            host: None,
+            weight: 1,
+            state,
+            since,
+            reason: reason.map(str::to_owned),
+        };
+        let mut named = target("10.0.0.1:80", TargetState::Healthy, at(1_761_696_000), None);
+        named.host = Some("api.internal".to_owned());
+        named.weight = 2;
+        let ejected = TargetState::Ejected {
+            until: UNIX_EPOCH + Duration::from_secs(1_761_696_070),
+        };
+        vec![
+            UpstreamReport {
+                name: "app".parse().expect("name"),
+                health_check: Some(HealthCheckKind::Http),
+                passive: true,
+                targets: vec![
+                    named,
+                    target(
+                        "10.0.0.2:80",
+                        TargetState::Unhealthy,
+                        at(1_761_696_030),
+                        Some("status 503"),
+                    ),
+                    target(
+                        "[::1]:80",
+                        ejected,
+                        at(1_761_696_060),
+                        Some("connection refused"),
+                    ),
+                ],
+            },
+            UpstreamReport {
+                name: "plain".parse().expect("name"),
+                health_check: None,
+                passive: false,
+                targets: vec![target("10.0.0.3:80", TargetState::Healthy, None, None)],
+            },
+        ]
     }
 }
 
@@ -67,6 +121,7 @@ impl Harness {
     async fn with_store(source: &str, store: Store, dir: TempDir) -> Self {
         let mut services = Services::new();
         services.register(Protocol::Http, Hello);
+        services.set_health_report(Report);
         let text = format!("version = 1\n[config]\nsource = \"{source}\"\n");
         let mut config = Config::from_toml(&text).expect("configuration");
         if let Some((_, dynamic)) = store.latest_version().await.expect("latest version") {
@@ -214,6 +269,50 @@ async fn reports_status() {
     assert_eq!(body["config"], json!({ "source": "db", "version": null }));
     assert_eq!(body["snapshot"], 1);
     assert_eq!(body["listeners"], json!([]));
+}
+
+/// The health of the upstreams comes from the report of the gateway, with RFC 3339 times, and
+/// needs the token.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reports_the_health_of_upstreams() {
+    let harness = Harness::start("db").await;
+    let request = Request::get("/api/v1/status/upstreams").body(Body::empty());
+    let (status, _, _) = harness.send(request.unwrap()).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let (status, body) = harness.get("/api/v1/status/upstreams").await;
+    assert_eq!(status, StatusCode::OK);
+    let target = |address: &str,
+                  host: Value,
+                  weight,
+                  state: &str,
+                  since: Value,
+                  until: Value,
+                  reason: Value| {
+        json!({
+            "address": address, "host": host, "weight": weight, "state": state,
+            "since": since, "until": until, "reason": reason,
+        })
+    };
+    let expected = json!({ "upstreams": [
+        {
+            "name": "app",
+            "health_check": "http",
+            "passive": true,
+            "targets": [
+                target("10.0.0.1:80", json!("api.internal"), 2, "healthy", json!("2025-10-29T00:00:00.000Z"), Value::Null, Value::Null),
+                target("10.0.0.2:80", Value::Null, 1, "unhealthy", json!("2025-10-29T00:00:30.000Z"), Value::Null, json!("status 503")),
+                target("[::1]:80", Value::Null, 1, "ejected", json!("2025-10-29T00:01:00.000Z"), json!("2025-10-29T00:01:10.000Z"), json!("connection refused")),
+            ],
+        },
+        {
+            "name": "plain",
+            "health_check": null,
+            "passive": false,
+            "targets": [target("10.0.0.3:80", Value::Null, 1, "healthy", Value::Null, Value::Null, Value::Null)],
+        },
+    ]});
+    assert_eq!(body, expected);
 }
 
 /// A change is saved as a version, applied, and visible in the configuration and the status.

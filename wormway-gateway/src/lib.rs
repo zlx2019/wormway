@@ -1,10 +1,10 @@
 //! The HTTP gateway of Wormway: serves the listeners with protocol `http` through Pingora and
 //! routes their requests to upstreams.
 //!
-//! [`Gateway::register`] adds two parts to the [`Services`] of the runtime: the service factory
-//! of protocol `http`, which gives every listener its own Pingora proxy, and an engine that
+//! [`Gateway::register`] adds three parts to the [`Services`] of the runtime: the service
+//! factory of protocol `http`, which gives every listener its own Pingora proxy, an engine that
 //! compiles the routes and upstreams of each configuration into a snapshot shared by all
-//! listeners. Every request takes the snapshot in effect when it starts and keeps it until it
+//! listeners, and the report of the health of the upstreams. Every request takes the snapshot in effect when it starts and keeps it until it
 //! ends. Listeners with TLS present the certificates of [`Certificates`] and agree on HTTP/2 or
 //! HTTP/1.1 during the handshake. Pingora types do not appear in the public API.
 
@@ -28,7 +28,7 @@ use wormway_runtime::Services;
 use wormway_tls::Certificates;
 
 use crate::listener::HttpListeners;
-use crate::snapshot::{GatewaySnapshot, Routing};
+use crate::snapshot::{GatewaySnapshot, Report, Routing};
 
 /// The HTTP gateway.
 pub struct Gateway {
@@ -56,13 +56,15 @@ impl Gateway {
         }
     }
 
-    /// Registers the gateway with `services`: the service factory of protocol `http` and the
-    /// engine of its routes and upstreams. The engine of the certificates is registered on its
-    /// own, see [`Certificates::register`].
+    /// Registers the gateway with `services`: the service factory of protocol `http`, the
+    /// engine of its routes and upstreams, and the report of the health of the upstreams. The
+    /// engine of the certificates is registered on its own, see [`Certificates::register`].
     pub fn register(self, services: &mut Services) {
         let routing = Routing::new(self.snapshot.clone(), self.certificates.clone());
+        let report = Report(self.snapshot.clone());
         let listeners = HttpListeners::new(self.snapshot, self.conf, self.certificates);
         services.register(Protocol::Http, listeners);
         services.add_engine(routing);
+        services.set_health_report(report);
     }
 }

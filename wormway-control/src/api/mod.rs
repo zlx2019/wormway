@@ -73,6 +73,7 @@ impl Admin {
     pub fn router(self: &Arc<Self>) -> Router {
         let protected = Router::new()
             .route("/api/v1/status", get(status::status))
+            .route("/api/v1/status/upstreams", get(status::upstreams))
             .route("/api/v1/config", get(config::show).put(config::replace))
             .route("/api/v1/config/validate", post(config::validate))
             .route("/api/v1/config/versions", get(config::versions))

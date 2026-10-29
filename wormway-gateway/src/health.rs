@@ -11,14 +11,15 @@
 use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use arc_swap::ArcSwap;
 use pingora::lb::Backend;
 use pingora::protocols::l4::socket::SocketAddr as PeerAddr;
 use tokio::task::JoinSet;
 use tracing::{info, warn};
-use wormway_core::config::{HealthCheck, Name, PassiveCheck, Upstream};
+use wormway_core::config::{HealthCheck, HealthCheckKind, Name, PassiveCheck, Upstream};
+use wormway_runtime::TargetState;
 
 use crate::probe::{self, Prober};
 use crate::upstream::{Connect, TargetHost};
@@ -90,6 +91,33 @@ impl UpstreamHealth {
         self.passive.is_some()
     }
 
+    /// Returns how the active checks probe the targets, if they are on.
+    pub(crate) fn kind(&self) -> Option<HealthCheckKind> {
+        self.check.as_ref().map(|check| check.kind)
+    }
+
+    /// Returns whether the target at `addr` gets requests at `now`, since when, and why not.
+    pub(crate) fn report(
+        &self,
+        addr: &PeerAddr,
+        now: Instant,
+    ) -> (TargetState, Option<SystemTime>, Option<String>) {
+        let Some(target) = self.target(addr) else {
+            return (TargetState::Healthy, None, None);
+        };
+        let record = target.lock();
+        if record.healthy == Some(false) {
+            return (TargetState::Unhealthy, record.since, record.reason.clone());
+        }
+        if target.out_until.load(Ordering::Relaxed) > self.clock(now)
+            && let Some(out) = &record.out
+        {
+            let state = TargetState::Ejected { until: out.until };
+            return (state, Some(out.since), Some(out.reason.clone()));
+        }
+        (TargetState::Healthy, record.since, None)
+    }
+
     /// Makes the probes reach the targets through `connect` from now on.
     pub(crate) fn reach(&self, connect: Arc<Connect>) {
         self.connect.store(connect);
@@ -156,17 +184,18 @@ impl UpstreamHealth {
             return;
         };
         let passed = result.is_ok();
-        let mut state = health.lock();
-        let before = state.healthy;
+        let mut record = health.lock();
+        let before = record.healthy;
         if let Err(reason) = result {
-            state.reason = Some(reason);
+            record.reason = Some(reason);
         }
-        if !state.observe(passed, check.healthy(), check.unhealthy()) {
+        if !record.observe(passed, check.healthy(), check.unhealthy()) {
             return;
         }
+        record.since = Some(SystemTime::now());
         health.up.store(passed, Ordering::Relaxed);
-        let reason = state.reason.clone().unwrap_or_default();
-        drop(state);
+        let reason = record.reason.clone().unwrap_or_default();
+        drop(record);
         let host = target
             .ext
             .get::<TargetHost>()
@@ -189,17 +218,22 @@ impl UpstreamHealth {
             return;
         }
         let window = passive.fail_timeout().get();
-        let mut state = health.lock();
-        if state.count_failure(now, window) < passive.max_fails() {
+        let mut record = health.lock();
+        if record.count_failure(now, window) < passive.max_fails() {
             return;
         }
-        state.fails = 0;
+        record.fails = 0;
         let reason = probe::describe(error);
-        state.reason = Some(reason.clone());
+        let since = SystemTime::now();
+        record.out = Some(Ejection {
+            since,
+            until: since + window,
+            reason: reason.clone(),
+        });
         health
             .out_until
             .store(clock + millis(window), Ordering::Relaxed);
-        drop(state);
+        drop(record);
         let host = target
             .ext
             .get::<TargetHost>()
@@ -305,7 +339,7 @@ struct TargetHealth {
     /// 0 when they never took it out.
     out_until: AtomicU64,
     /// The rest, for the checks.
-    state: Mutex<TargetState>,
+    state: Mutex<TargetRecord>,
 }
 
 impl TargetHealth {
@@ -314,15 +348,15 @@ impl TargetHealth {
         Self {
             up: AtomicBool::new(true),
             out_until: AtomicU64::new(0),
-            state: Mutex::new(TargetState {
+            state: Mutex::new(TargetRecord {
                 unprobed: checked,
-                ..TargetState::default()
+                ..TargetRecord::default()
             }),
         }
     }
 
     /// Locks the state.
-    fn lock(&self) -> MutexGuard<'_, TargetState> {
+    fn lock(&self) -> MutexGuard<'_, TargetRecord> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
@@ -334,22 +368,36 @@ impl TargetHealth {
 
 /// What the checks know about a target besides whether it may get requests.
 #[derive(Default)]
-struct TargetState {
+struct TargetRecord {
     /// Whether the active checks have yet to probe the target.
     unprobed: bool,
     /// Result of the active checks; `None` before the first probe.
     healthy: Option<bool>,
     /// Probes in a row whose result differs from `healthy`.
     streak: u32,
-    /// Why the target failed last.
+    /// When the result of the active checks last changed.
+    since: Option<SystemTime>,
+    /// Why the last probe that failed did.
     reason: Option<String>,
     /// Failed requests counted by the passive checks since `window`.
     fails: u32,
     /// When the passive checks started counting.
     window: Option<Instant>,
+    /// The last time the passive checks took the target out.
+    out: Option<Ejection>,
 }
 
-impl TargetState {
+/// A time the passive checks took a target out.
+struct Ejection {
+    /// When they took it out.
+    since: SystemTime,
+    /// When it gets requests again.
+    until: SystemTime,
+    /// The failure that took it out.
+    reason: String,
+}
+
+impl TargetRecord {
     /// Takes the result of a probe and returns whether the health changed: the first result
     /// decides, then `rise` passed or `fall` failed probes in a row are needed.
     fn observe(&mut self, passed: bool, rise: u32, fall: u32) -> bool {
@@ -456,7 +504,7 @@ mod tests {
     /// a result that agrees breaks a streak.
     #[test]
     fn needs_results_in_a_row() {
-        let mut state = TargetState::default();
+        let mut state = TargetRecord::default();
         assert!(state.observe(false, 2, 3));
         assert_eq!(state.healthy, Some(false));
         assert!(!state.observe(true, 2, 3));
@@ -470,7 +518,7 @@ mod tests {
         assert!(state.observe(false, 2, 3));
         assert_eq!(state.healthy, Some(false));
 
-        let mut fresh = TargetState::default();
+        let mut fresh = TargetRecord::default();
         assert!(fresh.observe(true, 2, 3));
         assert_eq!(fresh.healthy, Some(true));
     }
@@ -478,7 +526,7 @@ mod tests {
     /// Failures count within a window from the first one; a later failure starts a new window.
     #[test]
     fn counts_failures_within_a_window() {
-        let mut state = TargetState::default();
+        let mut state = TargetRecord::default();
         let start = Instant::now();
         let window = Duration::from_secs(10);
         assert_eq!(state.count_failure(start, window), 1);
@@ -518,6 +566,60 @@ mod tests {
         assert!(health.usable(&first.addr, now + Duration::from_secs(12)));
         assert!(health.usable(&second.addr, now + Duration::from_secs(1)));
         assert!(health.up(&first.addr));
+    }
+
+    /// The report says whether each target gets requests, since when and why not: the active
+    /// checks first, then the passive ones; addresses the health does not follow are healthy.
+    #[tokio::test]
+    async fn reports_why_targets_get_no_requests() {
+        let check = HealthCheck {
+            kind: HealthCheckKind::Tcp,
+            path: None,
+            host: None,
+            status: None,
+            interval: None,
+            timeout: None,
+            healthy: None,
+            unhealthy: None,
+        };
+        let passive = PassiveCheck {
+            max_fails: Some(1),
+            fail_timeout: Some(wormway_core::config::Duration::from_secs(10)),
+        };
+        let health = health(&settings(Some(check), Some(passive)));
+        let watch = health.watch();
+        let all = targets(&["10.0.0.1:80", "10.0.0.2:80", "10.0.0.3:80"]);
+        assert_eq!(watch.update(&all).len(), 3);
+        let [down, out, fine]: [&Backend; 3] = all.iter().collect::<Vec<_>>().try_into().unwrap();
+        health.observe(down, Err("status 503".to_owned()));
+        health.observe(out, Ok(()));
+        health.observe(fine, Ok(()));
+        let error = pingora::Error::new(pingora::ErrorType::ConnectRefused);
+        health.failed(out, &error, Instant::now());
+        health.failed(down, &error, Instant::now());
+
+        let now = Instant::now();
+        let (state, since, reason) = health.report(&down.addr, now);
+        assert_eq!(state, TargetState::Unhealthy);
+        assert!(since.is_some());
+        assert_eq!(reason.as_deref(), Some("status 503"));
+        let (state, since, reason) = health.report(&out.addr, now);
+        let TargetState::Ejected { until } = state else {
+            panic!("{state:?}");
+        };
+        let since = since.expect("ejected at");
+        assert_eq!(
+            until.duration_since(since).ok(),
+            Some(Duration::from_secs(10))
+        );
+        assert_eq!(reason.as_deref(), Some("connection refused"));
+        let (state, since, reason) = health.report(&fine.addr, now);
+        assert_eq!(
+            (state, since.is_some(), reason),
+            (TargetState::Healthy, true, None)
+        );
+        let unknown = health.report(&addr("10.0.0.9:80"), now);
+        assert_eq!(unknown, (TargetState::Healthy, None, None));
     }
 
     /// Runtimes share the health of the addresses they have in common, and the health forgets

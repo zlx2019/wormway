@@ -14,6 +14,7 @@ use tokio_util::task::TaskTracker;
 use wormway_core::config::{Config, ConfigError, Listener, Name, Protocol};
 
 use crate::engine::Staged;
+use crate::health::UpstreamReport;
 use crate::host::Host;
 use crate::service::{BoxError, ServiceFactory, Services};
 use crate::snapshot::Snapshot;
@@ -158,6 +159,15 @@ impl Server {
             }
         }
         listeners
+    }
+
+    /// Returns the upstreams in effect with the health of their targets; none without a health
+    /// report.
+    pub fn upstreams(&self) -> Vec<UpstreamReport> {
+        self.services
+            .health_report()
+            .map(|report| report.upstreams())
+            .unwrap_or_default()
     }
 
     /// Stops accepting on every listener and drains every service. Connections still open when

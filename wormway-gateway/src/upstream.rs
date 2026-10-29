@@ -20,6 +20,7 @@ use wormway_core::config::{
     Balance, HashKey, Name, RouteTimeouts, Target, TargetAddress, Timeouts, Upstream,
     UpstreamProtocol,
 };
+use wormway_runtime::{TargetReport, TargetState, UpstreamReport};
 
 use crate::health::{UpstreamHealth, Watch};
 use crate::upstream_tls::PeerTls;
@@ -233,6 +234,36 @@ impl UpstreamRuntime {
             let up = |target: &Backend| health.up(&target.addr) && accept(target);
             health.passive().then(|| self.pick(key, &up)).flatten()
         })
+    }
+
+    /// Returns the upstream with the health of each of its targets.
+    pub(crate) fn report(&self) -> UpstreamReport {
+        let health = self.health();
+        let now = Instant::now();
+        let targets = self.resolved.load();
+        let targets = targets.iter().filter_map(|target| {
+            let (state, since, reason) = match health {
+                Some(health) => health.report(&target.addr, now),
+                None => (TargetState::Healthy, None, None),
+            };
+            Some(TargetReport {
+                address: *target.addr.as_inet()?,
+                host: target
+                    .ext
+                    .get::<TargetHost>()
+                    .map(|TargetHost(host)| host.to_string()),
+                weight: u32::try_from(target.weight).unwrap_or(u32::MAX),
+                state,
+                since,
+                reason,
+            })
+        });
+        UpstreamReport {
+            name: self.name.clone(),
+            health_check: health.and_then(|health| health.kind()),
+            passive: health.is_some_and(|health| health.passive()),
+            targets: targets.collect(),
+        }
     }
 
     /// Counts a request to `target` that failed with `error`, for the passive checks.

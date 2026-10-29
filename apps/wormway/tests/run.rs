@@ -377,6 +377,46 @@ fn takes_the_token_from_the_environment() {
     assert_eq!(wormway.exit_code(), Some(0));
 }
 
+/// The Admin API reports the health of the targets that the gateway checks.
+#[test]
+fn reports_the_health_of_upstreams() {
+    let target = upstream("hello from the upstream");
+    let closed = TcpListener::bind("127.0.0.1:0")
+        .and_then(|listener| listener.local_addr())
+        .expect("a free port");
+    let config = format!(
+        "{EMPTY}[listeners.web]\nlisten = [\"127.0.0.1:0\"]\nprotocol = \"http\"\n[routes.all]\nupstream = \"app\"\n[upstreams.app]\ntargets = [\"{target}\", \"{closed}\"]\nhealth_check = {{ kind = \"tcp\", interval = \"1h\" }}\n"
+    );
+    let path = temp_config("run-health", &config);
+    let mut wormway = Wormway::start_with_env(&path, &[("WORMWAY_ADMIN_TOKEN", "health-token")]);
+    let addr = wormway.admin_addr();
+    wormway.wait_for("Wormway is ready");
+
+    let (status, body) = get(&addr, "/api/v1/status/upstreams", Some("health-token"));
+    assert_eq!(status, 200, "{body}");
+    let report: serde_json::Value = serde_json::from_str(&body).expect("a JSON answer");
+    let state = |address: SocketAddr| {
+        let targets = report["upstreams"][0]["targets"].as_array();
+        let target = targets
+            .into_iter()
+            .flatten()
+            .find(|target| target["address"] == address.to_string())?;
+        Some(format!("{} {}", target["state"], target["reason"]))
+    };
+    assert_eq!(
+        state(target).as_deref(),
+        Some(r#""healthy" null"#),
+        "{body}"
+    );
+    assert_eq!(
+        state(closed).as_deref(),
+        Some(r#""unhealthy" "connection refused""#),
+        "{body}"
+    );
+    wormway.signal("TERM");
+    assert_eq!(wormway.exit_code(), Some(0));
+}
+
 /// `wormway config apply` saves the settings of a file as a version from the command line, and
 /// `wormway config export` writes them in a form that `apply` reads back.
 #[test]

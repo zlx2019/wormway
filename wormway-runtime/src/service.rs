@@ -12,6 +12,7 @@ use tokio::sync::watch;
 use wormway_core::config::{Listener, Name, Protocol};
 
 use crate::engine::Engine;
+use crate::health::HealthReport;
 
 /// A boxed future, as returned by [`Service`] and [`Engine`] methods.
 pub type BoxFuture<'a, T = ()> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -54,14 +55,16 @@ pub trait ServiceFactory: Send + Sync + 'static {
     fn create(&self, name: &Name, listener: &Listener) -> Result<Arc<dyn Service>, BoxError>;
 }
 
-/// Service factories by protocol, and the engines that build their shared state. A listener
-/// whose protocol has no factory is rejected.
+/// Service factories by protocol, the engines that build their shared state, and the report
+/// of the health of the upstreams. A listener whose protocol has no factory is rejected.
 #[derive(Default)]
 pub struct Services {
     /// The factory of each available protocol.
     factories: HashMap<Protocol, Arc<dyn ServiceFactory>>,
     /// Engines in the order they were added, which is the order they prepare and commit in.
     engines: Vec<Arc<dyn Engine>>,
+    /// Reports the health of the upstreams, if a service has upstreams.
+    health: Option<Arc<dyn HealthReport>>,
 }
 
 impl Services {
@@ -80,9 +83,19 @@ impl Services {
         self.engines.push(Arc::new(engine));
     }
 
+    /// Sets the report of the health of the upstreams, replacing any previous one.
+    pub fn set_health_report(&mut self, report: impl HealthReport) {
+        self.health = Some(Arc::new(report));
+    }
+
     /// Returns the factory of `protocol`.
     pub(crate) fn get(&self, protocol: Protocol) -> Option<&Arc<dyn ServiceFactory>> {
         self.factories.get(&protocol)
+    }
+
+    /// Returns the report of the health of the upstreams, if any.
+    pub(crate) fn health_report(&self) -> Option<&Arc<dyn HealthReport>> {
+        self.health.as_ref()
     }
 
     /// Returns the engines in the order they were added.
