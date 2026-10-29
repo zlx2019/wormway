@@ -24,7 +24,7 @@
 | 路径 | 内容 |
 |---|---|
 | `zora-*/` | 库 crate，每个一个目录：`zora-core`（配置模型）、`zora-runtime`（监听器、配置热更新与优雅关闭）、`zora-control`（SQLite 存储与配置版本、Admin API、Prometheus 指标、面板）。 |
-| `apps/zora/` | `zora` 二进制：`zora run`、`zora check`（校验配置文件）和 `zora schema`。目前还没有内置任何协议，所以 `zora run` 只接受不含监听器的配置。 |
+| `apps/zora/` | `zora` 二进制：`zora run`、`zora check`（校验配置文件）、`zora schema`，以及 `zora config export` 和 `zora config apply`（通过 Admin API 导出、应用运行中 zora 的动态配置）。目前还没有内置任何协议，所以 `zora run` 只接受不含监听器的配置。 |
 | `ui/` | 面板（React 与 TypeScript）。zora 在 Admin API 地址的 `/ui/` 下提供面板，默认是 `http://127.0.0.1:9872/ui/`，登录时输入 Admin API 的 token。 |
 | `benches/` | 性能测量的方法，以及开放负载压测和记录测试环境的脚本。 |
 | `zora.example.toml` | 示例配置。 |

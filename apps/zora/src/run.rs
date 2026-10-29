@@ -48,11 +48,7 @@ pub fn run(path: &Path) -> anyhow::Result<ExitCode> {
     };
     logging::init(&config.log)?;
     info!("zora {} starting", env!("CARGO_PKG_VERSION"));
-    // Relative paths in the file are relative to the file, not to the working directory.
-    let data_dir = path
-        .parent()
-        .unwrap_or(Path::new(""))
-        .join(&config.storage.data_dir);
+    let data_dir = load::data_dir(path, &config);
     std::fs::create_dir_all(&data_dir)
         .with_context(|| format!("cannot create the data directory {}", data_dir.display()))?;
     let setup = Setup {

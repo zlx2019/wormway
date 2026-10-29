@@ -1,5 +1,7 @@
 //! The `zora` program: gateway, proxy protocols, reverse tunnels and dashboard in one binary.
 
+mod admin;
+mod config;
 mod load;
 mod logging;
 mod run;
@@ -35,6 +37,22 @@ enum Command {
     Check(ConfigArgs),
     /// Print the JSON Schema of the configuration file.
     Schema,
+    /// Export or apply the dynamic settings of a running zora through its Admin API.
+    ///
+    /// The address of the Admin API and the token file come from the configuration file of the
+    /// running zora. ZORA_ADMIN_TOKEN replaces the token file.
+    #[command(subcommand)]
+    Config(ConfigCommand),
+}
+
+/// Subcommands of `zora config`.
+#[derive(Subcommand)]
+enum ConfigCommand {
+    /// Print the dynamic settings in effect, in the format of the configuration file.
+    Export(ConfigArgs),
+    /// Apply the dynamic settings of a file as a new version. Settings missing from the file are
+    /// removed; static settings in the file are ignored.
+    Apply(ApplyArgs),
 }
 
 /// Selects the configuration file.
@@ -45,6 +63,20 @@ struct ConfigArgs {
     config: PathBuf,
 }
 
+/// Arguments of `zora config apply`.
+#[derive(Args)]
+struct ApplyArgs {
+    /// Configuration file of the running zora.
+    #[command(flatten)]
+    target: ConfigArgs,
+    /// File with the dynamic settings, in the format of the configuration file.
+    #[arg(short, long)]
+    file: PathBuf,
+    /// Note saved with the new version.
+    #[arg(short = 'm', long)]
+    comment: Option<String>,
+}
+
 /// Runs the chosen subcommand.
 fn main() -> anyhow::Result<ExitCode> {
     match Cli::parse().command {
@@ -53,6 +85,11 @@ fn main() -> anyhow::Result<ExitCode> {
         Command::Schema => {
             println!("{}", zora_core::config::json_schema());
             Ok(ExitCode::SUCCESS)
+        }
+        Command::Config(ConfigCommand::Export(args)) => config::export(&args.config),
+        Command::Config(ConfigCommand::Apply(args)) => {
+            let comment = args.comment.as_deref().unwrap_or_default();
+            config::apply(&args.target.config, &args.file, comment)
         }
     }
 }

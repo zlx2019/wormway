@@ -77,7 +77,7 @@ impl Position {
 }
 
 /// A problem with one setting, found by validation.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Issue {
     /// Path of the setting, such as `listeners.web.listen[0]`.
     pub path: String,

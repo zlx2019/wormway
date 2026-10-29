@@ -1,5 +1,5 @@
 //! End-to-end tests of `zora run`: startup, the Admin API, reload on SIGHUP and shutdown on
-//! SIGINT or SIGTERM.
+//! SIGINT or SIGTERM; and of the `zora config` commands against a running zora.
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -54,6 +54,38 @@ fn get(addr: &str, path: &str, token: Option<&str>) -> (u16, String) {
         .map(|(_, body)| body.to_owned())
         .unwrap_or_default();
     (status, body)
+}
+
+/// Runs `zora config ARGS -c path` with the Admin API token `token`, and returns the exit
+/// code, standard output and standard error.
+fn zora_config(path: &Path, token: &str, args: &[&str]) -> (Option<i32>, String, String) {
+    let output = Command::new(env!("CARGO_BIN_EXE_zora"))
+        .arg("config")
+        .args(args)
+        .arg("-c")
+        .arg(path)
+        .env_remove("ZORA_CONFIG")
+        .env("ZORA_ADMIN_TOKEN", token)
+        .output()
+        .expect("run zora config");
+    (
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// Starts `zora run` in database mode with the Admin API token `token`, and returns it with
+/// the address of the Admin API. The `zora config` commands find the API through the file, so
+/// the port the API got is written into it.
+fn start_for_config(name: &str, token: &str) -> (Zora, PathBuf, String) {
+    let path = temp_config(name, &format!("version = 1\n{ADMIN}"));
+    let mut zora = Zora::start_with_env(&path, &[("ZORA_ADMIN_TOKEN", token)]);
+    let addr = zora.admin_addr();
+    zora.wait_for("zora is ready");
+    let text = format!("version = 1\n[admin]\nlisten = \"{addr}\"\n");
+    std::fs::write(&path, text).expect("write the Admin API address");
+    (zora, path, addr)
 }
 
 /// A `zora run` process and its log lines.
@@ -246,4 +278,83 @@ fn takes_the_token_from_the_environment() {
     assert!(!path.with_file_name("data").join("admin.token").exists());
     zora.signal("TERM");
     assert_eq!(zora.exit_code(), Some(0));
+}
+
+/// `zora config apply` saves the settings of a file as a version from the command line, and
+/// `zora config export` writes them in a form that `apply` reads back.
+#[test]
+fn applies_and_exports_dynamic_settings() {
+    let (mut zora, path, addr) = start_for_config("config-apply", "cli-token");
+    let (code, empty, _) = zora_config(&path, "cli-token", &["export"]);
+    assert_eq!(code, Some(0));
+    assert!(empty.starts_with("version = 1\n"), "{empty}");
+
+    let file = path.with_file_name("dynamic.toml");
+    let file_arg = file.to_str().expect("UTF-8 path");
+    let certificate = "[certificates.example]\ncert = \"example.crt\"\nkey = \"example.key\"\n";
+    std::fs::write(&file, format!("version = 1\n{certificate}")).expect("write");
+    let apply = ["apply", "-f", file_arg, "-m", "from the command line"];
+    let (code, out, err) = zora_config(&path, "cli-token", &apply);
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out.trim(), "applied: version 1 is in effect");
+
+    let (code, exported, _) = zora_config(&path, "cli-token", &["export"]);
+    assert_eq!(code, Some(0));
+    assert!(exported.contains(certificate), "{exported}");
+    std::fs::write(&file, exported).expect("write");
+    let (code, out, _) = zora_config(&path, "cli-token", &["apply", "-f", file_arg]);
+    assert_eq!(code, Some(0));
+    assert_eq!(
+        out.trim(),
+        "no change: these settings are already in effect"
+    );
+
+    let (status, body) = get(&addr, "/api/v1/config/versions", Some("cli-token"));
+    assert_eq!(status, 200);
+    assert!(
+        body.contains(r#""source":"cli","comment":"from the command line""#),
+        "{body}"
+    );
+    zora.signal("TERM");
+    assert_eq!(zora.exit_code(), Some(0));
+}
+
+/// Problems are reported against the applied file, like `zora check` does, and nothing is
+/// applied: syntax errors before contacting zora, rule violations as zora reports them.
+#[test]
+fn reports_problems_with_applied_settings() {
+    let (mut zora, path, _) = start_for_config("config-problems", "cli-token");
+    let file = path.with_file_name("dynamic.toml");
+    let file_arg = file.to_str().expect("UTF-8 path");
+    let file_name = file.display().to_string();
+
+    std::fs::write(&file, "version = 1\n[listeners\n").expect("write");
+    let (code, _, err) = zora_config(&path, "cli-token", &["apply", "-f", file_arg]);
+    assert_eq!(code, Some(1));
+    assert!(
+        err.starts_with(&format!("{file_name}:2:11: error:")),
+        "{err}"
+    );
+
+    let listener = "[listeners.web]\nlisten = [\"127.0.0.1:0\"]\nprotocol = \"http\"\n";
+    std::fs::write(&file, format!("version = 1\n{listener}")).expect("write");
+    let (code, _, err) = zora_config(&path, "cli-token", &["apply", "-f", file_arg]);
+    assert_eq!(code, Some(1));
+    assert!(
+        err.contains(&format!(
+            "{file_name}: error: listeners.web.protocol: protocol http is not available"
+        )),
+        "{err}"
+    );
+
+    let (code, _, err) = zora_config(&path, "wrong-token", &["export"]);
+    assert_eq!(code, Some(1));
+    assert!(err.contains("missing or wrong token"), "{err}");
+    assert!(err.contains("hint: set ZORA_ADMIN_TOKEN"), "{err}");
+
+    zora.signal("TERM");
+    assert_eq!(zora.exit_code(), Some(0));
+    let (code, _, err) = zora_config(&path, "cli-token", &["export"]);
+    assert_eq!(code, Some(1));
+    assert!(err.contains("cannot reach the Admin API"), "{err}");
 }

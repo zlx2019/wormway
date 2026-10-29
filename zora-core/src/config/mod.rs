@@ -65,10 +65,7 @@ pub struct Config {
 impl Config {
     /// Parses TOML text and validates the result.
     pub fn from_toml(text: &str) -> Result<Self, ConfigError> {
-        // Check the version first. Tables are deserialized in key order rather than file order,
-        // so in one pass an unknown key could hide the version error of a newer file.
-        toml::from_str::<Header>(text).map_err(|e| ParseError::from_toml(&e, text))?;
-        let config: Self = toml::from_str(text).map_err(|e| ParseError::from_toml(&e, text))?;
+        let config = parse(text)?;
         config.validate().map_err(ConfigError::Invalid)?;
         Ok(config)
     }
@@ -133,6 +130,43 @@ pub struct DynamicConfig {
     /// TLS certificates by name.
     #[serde(default)]
     pub certificates: BTreeMap<Name, Certificate>,
+}
+
+impl DynamicConfig {
+    /// Reads the dynamic settings from text in the format of `zora.toml`, such as the output of
+    /// [`DynamicConfig::to_toml`] or a whole configuration file. Static settings in the text are
+    /// parsed and then ignored. Rules are not checked: they also depend on the static settings
+    /// of the instance that applies the result.
+    pub fn from_toml(text: &str) -> Result<Self, ParseError> {
+        parse(text).map(Config::into_dynamic)
+    }
+
+    /// Writes the dynamic settings in the format of `zora.toml`: the format version, then the
+    /// tables.
+    pub fn to_toml(&self) -> Result<String, impl std::error::Error + Send + Sync + 'static> {
+        toml::to_string_pretty(&DynamicFile {
+            version: Version::CURRENT,
+            dynamic: self,
+        })
+    }
+}
+
+/// What [`DynamicConfig::to_toml`] writes.
+#[derive(Serialize)]
+struct DynamicFile<'a> {
+    /// Version of the format, as in `zora.toml`.
+    version: Version,
+    /// The tables.
+    #[serde(flatten)]
+    dynamic: &'a DynamicConfig,
+}
+
+/// Parses TOML text into a configuration without validating it.
+fn parse(text: &str) -> Result<Config, ParseError> {
+    // Check the version first. Tables are deserialized in key order rather than file order, so
+    // in one pass an unknown key could hide the version error of a newer file.
+    toml::from_str::<Header>(text).map_err(|e| ParseError::from_toml(&e, text))?;
+    toml::from_str(text).map_err(|e| ParseError::from_toml(&e, text))
 }
 
 /// The part of the file read before everything else; other keys are ignored here.
@@ -383,6 +417,45 @@ mod tests {
         let dynamic: DynamicConfig = serde_json::from_str(json).unwrap();
         assert_eq!(serde_json::to_string(&dynamic).unwrap(), json);
         assert!(serde_json::from_str::<DynamicConfig>(r#"{"routes":{}}"#).is_err());
+    }
+
+    /// The dynamic settings are written in the format of `zora.toml` and read back; a whole
+    /// configuration file gives its dynamic settings.
+    #[test]
+    fn dynamic_settings_round_trip_through_toml() {
+        let text = "version = 1\n[server]\nthreads = 4\n[listeners.web]\nlisten = [\"127.0.0.1:8080\"]\nprotocol = \"http\"\n";
+        let dynamic = DynamicConfig::from_toml(text).unwrap();
+        assert_eq!(dynamic, Config::from_toml(text).unwrap().into_dynamic());
+
+        let written = dynamic.to_toml().unwrap();
+        assert!(written.starts_with("version = 1\n"), "{written}");
+        assert!(!written.contains("threads"), "{written}");
+        assert_eq!(DynamicConfig::from_toml(&written).unwrap(), dynamic);
+
+        let empty = DynamicConfig::default().to_toml().unwrap();
+        assert_eq!(
+            DynamicConfig::from_toml(&empty).unwrap(),
+            DynamicConfig::default()
+        );
+    }
+
+    /// Reading dynamic settings checks the version and the structure, but not the rules.
+    #[test]
+    fn reads_dynamic_settings_without_validating() {
+        let error = DynamicConfig::from_toml("[listeners]\n").unwrap_err();
+        assert!(error.message.contains("missing field `version`"), "{error}");
+        let error = DynamicConfig::from_toml(
+            "version = 1\n[listeners.web]\nlisten = []\nprotocol = \"http\"\nport = 1\n",
+        )
+        .unwrap_err();
+        assert_eq!(error.position, at(5, 1));
+
+        // An empty address list breaks a rule, which the instance that applies it checks.
+        let dynamic = DynamicConfig::from_toml(
+            "version = 1\n[listeners.web]\nlisten = []\nprotocol = \"http\"\n",
+        )
+        .unwrap();
+        assert_eq!(dynamic.listeners.len(), 1);
     }
 
     /// Validation problems come back together, after parsing succeeds.

@@ -1,6 +1,6 @@
 //! Reading and checking the configuration file.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use zora_core::config::{Config, ConfigError, Issue};
@@ -13,6 +13,14 @@ pub fn load(path: &Path) -> anyhow::Result<Result<Config, ConfigError>> {
     let text =
         std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
     Ok(Config::from_toml(&text).and_then(check_log_filter))
+}
+
+/// Returns the data directory set in `config`, read from the file at `path`. A relative
+/// directory is relative to the file, not to the working directory.
+pub fn data_dir(path: &Path, config: &Config) -> PathBuf {
+    path.parent()
+        .unwrap_or(Path::new(""))
+        .join(&config.storage.data_dir)
 }
 
 /// Checks `log.level`, which only the logging setup of the binary can parse.
