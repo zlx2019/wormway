@@ -17,6 +17,9 @@
 /ui/node_modules/
 /ui/dist/
 
+# Benchmark results
+/benches/results/
+
 # Profiling artifacts
 perf.data*
 flamegraph.svg

@@ -50,3 +50,8 @@ unwrap_used = "deny"
 dbg_macro = "warn"
 todo = "warn"
 unimplemented = "warn"
+
+# Release builds optimize across all crates as one unit: slower to build, faster to run.
+[profile.release]
+lto = "fat"
+codegen-units = 1

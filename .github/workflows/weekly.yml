@@ -1,0 +1,59 @@
+name: Weekly
+
+# Builds and tests against the newest compatible versions of all dependencies, transitive ones
+# included, so that breakage from upstream shows up here first. The regular CI keeps using the
+# committed Cargo.lock.
+on:
+  schedule:
+    # Mondays at 03:00 UTC
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+
+# Least privilege: read-only access to repository contents
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+# Third-party actions are pinned to commit hashes with the version in a comment.
+jobs:
+  # New advisories against the versions in the committed Cargo.lock, even without new commits
+  advisories:
+    name: advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check advisories
+
+  latest-dependencies:
+    name: latest dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install toolchain
+        run: rustup toolchain install stable --profile minimal --component clippy
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: nextest
+      - name: Update dependencies
+        run: cargo update --verbose
+      # Deprecations in new versions show up as warnings
+      - name: Lint (warnings are errors)
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Run tests
+        run: cargo nextest run --workspace --all-features
+      # nextest does not run doctests, so run them separately
+      - name: Run doctests
+        run: cargo test --workspace --doc --all-features
+      # Licenses, sources and advisories of the new versions
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
