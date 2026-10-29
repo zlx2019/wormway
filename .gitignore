@@ -37,3 +37,5 @@ heaptrack.*
 .claude/settings.local.json
 docs/
 poc/
+demo/
+.cargo/
