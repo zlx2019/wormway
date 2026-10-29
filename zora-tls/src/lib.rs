@@ -14,18 +14,19 @@ mod load;
 mod resolve;
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 
 use arc_swap::ArcSwap;
 use rustls::ServerConfig;
 use rustls::crypto::CryptoProvider;
+use rustls::pki_types::CertificateDer;
 use rustls::server::ServerSessionMemoryCache;
-use zora_core::config::Name;
+use zora_core::config::{Issue, Name};
 use zora_runtime::Services;
 
 use crate::engine::Loader;
-pub use crate::load::CertificateInfo;
+pub use crate::load::{CertificateInfo, ClientCertificate};
 use crate::resolve::{ListenerResolver, TlsSnapshot};
 
 /// TLS 1.2 sessions that each listener keeps for resumption by session ID.
@@ -75,6 +76,30 @@ impl Certificates {
         config.session_storage = ServerSessionMemoryCache::new(SESSION_CACHE_SIZE);
         config.ticketer = rustls::crypto::aws_lc_rs::Ticketer::new()?;
         Ok(Arc::new(config))
+    }
+
+    /// Reads the certificate authorities in the PEM file at `path`, relative to the directory of
+    /// the configuration file. The problem comes with path `at`. It reads the file, so call it
+    /// on the blocking pool.
+    pub fn read_authorities(
+        &self,
+        path: &Path,
+        at: &str,
+    ) -> Result<Vec<CertificateDer<'static>>, Issue> {
+        load::load_authorities(&self.base.join(path)).map_err(|problem| Issue::new(at, problem))
+    }
+
+    /// Reads the client certificate in the PEM files at `cert` and `key`, relative to the
+    /// directory of the configuration file, and checks that the key belongs to it. Problems
+    /// come with paths under `at`, such as `<at>.cert`. It reads files, so call it on the
+    /// blocking pool.
+    pub fn read_client_certificate(
+        &self,
+        cert: &Path,
+        key: &Path,
+        at: &str,
+    ) -> Result<ClientCertificate, Issue> {
+        load::load_client_certificate(&provider(), &self.base.join(cert), &self.base.join(key), at)
     }
 
     /// Returns the details of the certificates in effect, by name.

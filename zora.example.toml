@@ -85,6 +85,14 @@ timeouts = { connect = "10s", read = "60s", write = "60s", idle = "60s" }   # th
 retries = 1                              # default; other targets tried when connecting fails,
                                          # never after the request reached a target
 
+# HTTPS to the targets, here over HTTP/2 (protocol "h1" is the default; "h2c" is HTTP/2 without
+# TLS). Certificates are checked against the system's authorities unless ca is set, for the host
+# name of each target, or its IP address. Relative paths are relative to this file.
+[upstreams.payments]
+targets = ["payments.internal:443"]
+protocol = "h2"
+tls = { ca = "certs/internal-ca.crt", cert = "certs/zora-client.crt", key = "certs/zora-client.key" }
+
 # Relative paths are relative to this file. The files are read again on every change and on
 # SIGHUP, so renewed certificates take effect without a restart.
 [certificates.example]

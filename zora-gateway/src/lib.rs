@@ -15,6 +15,7 @@ mod proxy;
 mod route;
 mod snapshot;
 mod upstream;
+mod upstream_tls;
 
 use std::sync::Arc;
 
@@ -57,8 +58,9 @@ impl Gateway {
     /// engine of its routes and upstreams. The engine of the certificates is registered on its
     /// own, see [`Certificates::register`].
     pub fn register(self, services: &mut Services) {
-        let listeners = HttpListeners::new(self.snapshot.clone(), self.conf, self.certificates);
+        let routing = Routing::new(self.snapshot.clone(), self.certificates.clone());
+        let listeners = HttpListeners::new(self.snapshot, self.conf, self.certificates);
         services.register(Protocol::Http, listeners);
-        services.add_engine(Routing::new(self.snapshot));
+        services.add_engine(routing);
     }
 }

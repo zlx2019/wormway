@@ -1,12 +1,13 @@
 //! Rules that span fields. Each check appends to a list, so one run reports every problem.
 
 use std::collections::HashSet;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 
 use super::http::is_token;
+use super::upstream::is_host_name;
 use super::{
     Balance, Config, ConfigSource, Duration, HashKey, HeaderName, HeaderRules, Issue, Name,
-    PathPattern, Redirect, Route, Target, Upstream,
+    PathPattern, Redirect, Route, Target, Upstream, UpstreamProtocol,
 };
 use crate::routing::normalize_path;
 
@@ -357,6 +358,41 @@ fn check_upstreams(config: &Config, issues: &mut Vec<Issue>) {
                 format!("must be at most {}", Upstream::MAX_RETRIES),
             ));
         }
+        check_upstream_tls(name, upstream, issues);
+    }
+}
+
+/// The protocol fits the TLS setting, and the TLS settings are complete and used.
+fn check_upstream_tls(name: &Name, upstream: &Upstream, issues: &mut Vec<Issue>) {
+    let protocol = match (upstream.protocol(), &upstream.tls) {
+        (UpstreamProtocol::H2, None) => Some("h2 needs tls; h2c is HTTP/2 without TLS"),
+        (UpstreamProtocol::H2c, Some(_)) => Some("h2c is HTTP/2 without TLS; use h2 with tls"),
+        _ => None,
+    };
+    if let Some(problem) = protocol {
+        issues.push(Issue::new(format!("upstreams.{name}.protocol"), problem));
+    }
+    let Some(tls) = &upstream.tls else {
+        return;
+    };
+    let at = format!("upstreams.{name}.tls");
+    if let Some(sni) = &tls.sni
+        && !is_host_name(sni)
+        && sni.parse::<IpAddr>().is_err()
+    {
+        issues.push(Issue::new(
+            format!("{at}.sni"),
+            "must be a host name or an IP address",
+        ));
+    }
+    if tls.ca.is_some() && !tls.verify() {
+        issues.push(Issue::new(
+            format!("{at}.ca"),
+            "unused while verify is false",
+        ));
+    }
+    if tls.cert.is_some() != tls.key.is_some() {
+        issues.push(Issue::new(&at, "set cert and key together"));
     }
 }
 
@@ -691,6 +727,40 @@ mod tests {
         assert_eq!(issues[2].message, "api.internal:80 is listed twice");
         assert_eq!(issues[3].message, "only for balance = \"consistent_hash\"");
         assert_eq!(issues[6].message, "must be at most 10");
+    }
+
+    /// HTTP/2 over TLS needs TLS and h2c goes without; TLS settings are complete and used.
+    #[test]
+    fn checks_upstream_protocols_and_tls() {
+        let config = parse(
+            r#"
+            version = 1
+            [upstreams.plain]
+            targets = ["10.0.0.1:80"]
+            protocol = "h2"
+            [upstreams.mixed]
+            targets = ["10.0.0.1:443"]
+            protocol = "h2c"
+            tls = { sni = "bad name", verify = false, ca = "ca.pem", cert = "zora.crt" }
+            [upstreams.fine]
+            targets = ["10.0.0.1:443"]
+            protocol = "h2"
+            tls = { sni = "10.0.0.1", ca = "ca.pem", cert = "zora.crt", key = "zora.key" }
+            "#,
+        );
+        let issues = errors(&config);
+        assert_eq!(
+            paths(&issues),
+            [
+                "upstreams.mixed.protocol",
+                "upstreams.mixed.tls.sni",
+                "upstreams.mixed.tls.ca",
+                "upstreams.mixed.tls",
+                "upstreams.plain.protocol",
+            ]
+        );
+        assert_eq!(issues[3].message, "set cert and key together");
+        assert_eq!(issues[4].message, "h2 needs tls; h2c is HTTP/2 without TLS");
     }
 
     /// h2c is for listeners without TLS only.

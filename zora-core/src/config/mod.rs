@@ -44,7 +44,7 @@ pub use settings::{
 };
 pub use upstream::{
     Balance, HashKey, InvalidTargetAddress, RouteTimeouts, Target, TargetAddress, Timeouts,
-    Upstream,
+    Upstream, UpstreamProtocol, UpstreamTls,
 };
 
 /// The configuration file, `zora.toml`.

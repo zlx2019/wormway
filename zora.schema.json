@@ -726,6 +726,17 @@
           ],
           "description": "What `consistent_hash` hashes. A request without it, such as one without the header,\nhashes its client IP address instead. Default: `\"client_ip\"`."
         },
+        "protocol": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/UpstreamProtocol"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The protocol spoken with the targets. Default: `\"h1\"`."
+        },
         "retries": {
           "description": "How many other targets a request tries when it cannot connect, from 0 to\n[`Upstream::MAX_RETRIES`]. A request that reached a target is not sent to another one.\nDefault: 1.",
           "format": "uint32",
@@ -749,11 +760,84 @@
             }
           ],
           "description": "Time limits of the connections and requests to the targets."
+        },
+        "tls": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/UpstreamTls"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Connect to the targets with TLS. `tls = {}` checks their certificates against the\nsystem's certificate authorities."
         }
       },
       "required": [
         "targets"
       ],
+      "type": "object"
+    },
+    "UpstreamProtocol": {
+      "description": "The protocol spoken with the targets of an upstream.",
+      "oneOf": [
+        {
+          "const": "h1",
+          "description": "HTTP/1.1.",
+          "type": "string"
+        },
+        {
+          "const": "h2",
+          "description": "HTTP/2 over TLS, agreed on during the handshake; needs `tls`. gRPC needs HTTP/2.",
+          "type": "string"
+        },
+        {
+          "const": "h2c",
+          "description": "HTTP/2 without TLS, from the first byte (prior knowledge); not with `tls`.",
+          "type": "string"
+        }
+      ]
+    },
+    "UpstreamTls": {
+      "additionalProperties": false,
+      "description": "TLS to the targets of an upstream. Relative paths are relative to the configuration file;\nthe files are read again on every change and on SIGHUP.",
+      "properties": {
+        "ca": {
+          "description": "PEM file with the certificate authorities that the certificates of the targets must come\nfrom, in place of the system's.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cert": {
+          "description": "PEM file with the certificate chain, leaf first, that zora presents to targets that ask\nfor one. Set together with `key`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "key": {
+          "description": "PEM file with the private key of `cert`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sni": {
+          "description": "Name sent to the targets (SNI) and that their certificates must have. Default: the host\nname of the target, or its IP address, which is checked against the IP addresses of the\ncertificate and not sent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "verify": {
+          "description": "Check the certificates of the targets. `false` accepts any certificate, so that anyone\non the path can read and change the traffic. Default: `true`.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
       "type": "object"
     }
   },

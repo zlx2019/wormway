@@ -8,9 +8,11 @@ use arc_swap::ArcSwap;
 use zora_core::config::{Config, Issue, Name, Protocol, Upstream};
 use zora_core::routing::{Request, Router};
 use zora_runtime::{BoxFuture, Engine, Staged};
+use zora_tls::Certificates;
 
 use crate::route::CompiledRoute;
 use crate::upstream::{CompiledUpstream, UpstreamRuntime};
+use crate::upstream_tls::PeerTls;
 
 /// Most targets of one upstream: Pingora's load balancer indexes them with 16 bits.
 const MAX_TARGETS: usize = u16::MAX as usize;
@@ -36,17 +38,30 @@ impl GatewaySnapshot {
         self.routers.get(listener)?.find(request)
     }
 
-    /// Compiles `config`, reusing the upstreams of `self` whose settings did not change.
-    async fn compile(&self, config: &Config) -> Result<Self, Vec<Issue>> {
+    /// Compiles `config`, reusing the upstream runtimes of `self` whose targets and balancing
+    /// did not change. The TLS files of upstreams are read again, relative to the configuration
+    /// file of `certificates`.
+    async fn compile(
+        &self,
+        config: &Config,
+        certificates: &Certificates,
+    ) -> Result<Self, Vec<Issue>> {
         let mut issues = Vec::new();
         let mut upstreams = BTreeMap::new();
         for (name, settings) in &config.upstreams {
-            match self.upstream(name, settings).await {
-                Ok(runtime) => {
-                    let compiled = CompiledUpstream::new(runtime, settings);
+            let tls = match &settings.tls {
+                Some(tls) => PeerTls::load(name, tls, certificates).await.map(Some),
+                None => Ok(None),
+            };
+            match (self.upstream(name, settings).await, tls) {
+                (Ok(runtime), Ok(tls)) => {
+                    let compiled = CompiledUpstream::new(runtime, settings, tls);
                     upstreams.insert(name.clone(), Arc::new(compiled));
                 }
-                Err(problems) => issues.extend(problems),
+                (runtime, tls) => {
+                    issues.extend(runtime.err().into_iter().flatten());
+                    issues.extend(tls.err().into_iter().flatten());
+                }
             }
         }
         if !issues.is_empty() {
@@ -113,12 +128,18 @@ impl GatewaySnapshot {
 pub(crate) struct Routing {
     /// Where the snapshot in effect is published.
     snapshot: Arc<ArcSwap<GatewaySnapshot>>,
+    /// Reads the TLS files of upstreams, relative to the configuration file.
+    certificates: Certificates,
 }
 
 impl Routing {
-    /// Creates the engine that publishes to `snapshot`.
-    pub(crate) fn new(snapshot: Arc<ArcSwap<GatewaySnapshot>>) -> Self {
-        Self { snapshot }
+    /// Creates the engine that publishes to `snapshot` and reads TLS files with
+    /// `certificates`.
+    pub(crate) fn new(snapshot: Arc<ArcSwap<GatewaySnapshot>>, certificates: Certificates) -> Self {
+        Self {
+            snapshot,
+            certificates,
+        }
     }
 }
 
@@ -129,7 +150,11 @@ impl Engine for Routing {
         config: &'a Config,
     ) -> BoxFuture<'a, Result<Box<dyn Staged>, Vec<Issue>>> {
         Box::pin(async move {
-            let next = self.snapshot.load_full().compile(config).await?;
+            let next = self
+                .snapshot
+                .load_full()
+                .compile(config, &self.certificates)
+                .await?;
             let staged: Box<dyn Staged> = Box::new(Compiled {
                 target: self.snapshot.clone(),
                 next: Arc::new(next),
@@ -175,6 +200,11 @@ mod tests {
         }
     }
 
+    /// Reads TLS files relative to the working directory.
+    fn files() -> Certificates {
+        Certificates::new(".")
+    }
+
     /// Parses a configuration, adding `version = 1` in front.
     fn parse(text: &str) -> Config {
         Config::from_toml(&format!("version = 1\n{text}")).unwrap()
@@ -216,7 +246,7 @@ mod tests {
     #[tokio::test]
     async fn gives_each_listener_its_routes() {
         let snapshot = GatewaySnapshot::default()
-            .compile(&parse(BASE))
+            .compile(&parse(BASE), &files())
             .await
             .unwrap();
         assert!(route(&snapshot, "web", Some("example.com")).is_some());
@@ -225,7 +255,7 @@ mod tests {
 
         let everywhere = BASE.replace("listeners = [\"web\"]\n", "");
         let snapshot = GatewaySnapshot::default()
-            .compile(&parse(&everywhere))
+            .compile(&parse(&everywhere), &files())
             .await
             .unwrap();
         assert!(route(&snapshot, "api", None).is_some());
@@ -236,14 +266,14 @@ mod tests {
     #[tokio::test]
     async fn reuses_unchanged_upstreams() {
         let first = GatewaySnapshot::default()
-            .compile(&parse(BASE))
+            .compile(&parse(BASE), &files())
             .await
             .unwrap();
         let changed = BASE.replace("127.0.0.1:9002", "127.0.0.1:9003").replace(
             "targets = [\"127.0.0.1:9001\"]",
             "targets = [\"127.0.0.1:9001\"]\nretries = 0",
         );
-        let second = first.compile(&parse(&changed)).await.unwrap();
+        let second = first.compile(&parse(&changed), &files()).await.unwrap();
         assert!(Arc::ptr_eq(
             &first.upstreams["app"].runtime,
             &second.upstreams["app"].runtime
@@ -254,7 +284,7 @@ mod tests {
             &second.upstreams["other"].runtime
         ));
         let balanced = changed.replace("retries = 0", "balance = \"least_conn\"");
-        let third = second.compile(&parse(&balanced)).await.unwrap();
+        let third = second.compile(&parse(&balanced), &files()).await.unwrap();
         assert!(!Arc::ptr_eq(
             &second.upstreams["app"].runtime,
             &third.upstreams["app"].runtime
@@ -271,12 +301,38 @@ mod tests {
     async fn rejects_names_that_do_not_resolve() {
         let unknown = BASE.replace("127.0.0.1:9002", "unknown.invalid:9002");
         let issues = GatewaySnapshot::default()
-            .compile(&parse(&unknown))
+            .compile(&parse(&unknown), &files())
             .await
             .err()
             .unwrap();
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].path, "upstreams.other.targets[0]");
         assert!(issues[0].message.contains("unknown.invalid"), "{issues:?}");
+    }
+
+    /// TLS files that cannot be read reject the configuration at their setting, together with
+    /// the other problems of the upstream.
+    #[tokio::test]
+    async fn rejects_unreadable_tls_files() {
+        let broken = BASE.replace(
+            "targets = [\"127.0.0.1:9002\"]",
+            "targets = [\"unknown.invalid:9002\"]\n\
+             tls = { ca = \"missing-ca.pem\", cert = \"missing.crt\", key = \"missing.key\" }",
+        );
+        let issues = GatewaySnapshot::default()
+            .compile(&parse(&broken), &files())
+            .await
+            .err()
+            .unwrap();
+        let paths: Vec<&str> = issues.iter().map(|issue| issue.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            [
+                "upstreams.other.targets[0]",
+                "upstreams.other.tls.ca",
+                "upstreams.other.tls.cert",
+            ]
+        );
+        assert!(issues[1].message.contains("missing-ca.pem"), "{issues:?}");
     }
 }

@@ -2,6 +2,7 @@
 
 use std::fmt;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::str::FromStr;
 
 use serde::de::value::MapAccessDeserializer;
@@ -32,6 +33,13 @@ pub struct Upstream {
     /// Default: 1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retries: Option<u32>,
+    /// The protocol spoken with the targets. Default: `"h1"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<UpstreamProtocol>,
+    /// Connect to the targets with TLS. `tls = {}` checks their certificates against the
+    /// system's certificate authorities.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls: Option<UpstreamTls>,
 }
 
 impl Upstream {
@@ -53,6 +61,60 @@ impl Upstream {
     /// Returns the number of retries in effect.
     pub fn retries(&self) -> u32 {
         self.retries.unwrap_or(Self::DEFAULT_RETRIES)
+    }
+
+    /// Returns the protocol in effect.
+    pub fn protocol(&self) -> UpstreamProtocol {
+        self.protocol.unwrap_or_default()
+    }
+}
+
+/// The protocol spoken with the targets of an upstream.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum UpstreamProtocol {
+    /// HTTP/1.1.
+    #[default]
+    H1,
+    /// HTTP/2 over TLS, agreed on during the handshake; needs `tls`. gRPC needs HTTP/2.
+    H2,
+    /// HTTP/2 without TLS, from the first byte (prior knowledge); not with `tls`.
+    H2c,
+}
+
+/// TLS to the targets of an upstream. Relative paths are relative to the configuration file;
+/// the files are read again on every change and on SIGHUP.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct UpstreamTls {
+    /// Name sent to the targets (SNI) and that their certificates must have. Default: the host
+    /// name of the target, or its IP address, which is checked against the IP addresses of the
+    /// certificate and not sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sni: Option<String>,
+    /// Check the certificates of the targets. `false` accepts any certificate, so that anyone
+    /// on the path can read and change the traffic. Default: `true`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify: Option<bool>,
+    /// PEM file with the certificate authorities that the certificates of the targets must come
+    /// from, in place of the system's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ca: Option<PathBuf>,
+    /// PEM file with the certificate chain, leaf first, that zora presents to targets that ask
+    /// for one. Set together with `key`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cert: Option<PathBuf>,
+    /// PEM file with the private key of `cert`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<PathBuf>,
+}
+
+impl UpstreamTls {
+    /// Whether the certificates of the targets are checked.
+    pub fn verify(&self) -> bool {
+        self.verify.unwrap_or(true)
     }
 }
 
@@ -268,7 +330,7 @@ impl<'de> Deserialize<'de> for TargetAddress {
 /// Whether `host` is a host name: dot-separated labels of 1 to 63 letters, digits, `-` and `_`,
 /// not starting or ending with `-`, at most 253 characters in all, and not ending with a label of
 /// digits only, which belongs to an IPv4 address.
-fn is_host_name(host: &str) -> bool {
+pub(crate) fn is_host_name(host: &str) -> bool {
     let label_ok = |label: &str| {
         (1..=63).contains(&label.len())
             && !label.starts_with('-')
@@ -510,6 +572,30 @@ mod tests {
         assert!(error.message().contains("an address such as"), "{error}");
     }
 
+    /// The protocol and the TLS settings are read and written back; an empty table turns TLS
+    /// on with the defaults.
+    #[test]
+    fn reads_protocols_and_tls() {
+        let text = r#"
+            targets = ["10.0.0.1:443"]
+            protocol = "h2"
+            tls = { sni = "api.internal", ca = "certs/ca.pem", cert = "certs/zora.crt", key = "certs/zora.key" }
+        "#;
+        let upstream: Upstream = toml::from_str(text).unwrap();
+        assert_eq!(upstream.protocol(), UpstreamProtocol::H2);
+        let tls = upstream.tls.clone().unwrap();
+        assert_eq!(tls.sni.as_deref(), Some("api.internal"));
+        assert!(tls.verify());
+        assert_eq!(tls.ca, Some(PathBuf::from("certs/ca.pem")));
+        let toml = toml::to_string(&upstream).unwrap();
+        assert_eq!(toml::from_str::<Upstream>(&toml).unwrap(), upstream);
+
+        let plain: Upstream = toml::from_str("targets = []\ntls = {}").unwrap();
+        assert_eq!(plain.protocol(), UpstreamProtocol::H1);
+        assert_eq!(plain.tls, Some(UpstreamTls::default()));
+        assert!(toml::from_str::<Upstream>("targets = []\ntls = { crt = \"a\" }").is_err());
+    }
+
     /// Balancing, the hash key, the time limits and the retries are read and written back.
     #[test]
     fn reads_and_writes_the_settings() {
@@ -542,6 +628,7 @@ mod tests {
             assert!(toml::from_str::<Upstream>(&text).is_ok(), "{key}");
         }
         assert!(toml::from_str::<Upstream>("targets = []\nbalance = \"fastest\"").is_err());
+        assert!(toml::from_str::<Upstream>("targets = []\nprotocol = \"h3\"").is_err());
         assert!(toml::from_str::<Upstream>("targets = []\ntimeouts = { total = \"1s\" }").is_err());
     }
 }

@@ -90,31 +90,95 @@ pub(crate) fn load(
         .ok_or_else(|| "no certificate found".to_owned())
         .and_then(CertificateInfo::parse)
         .map_err(|e| Issue::new(at("cert"), e))?;
-    let signing = provider
-        .key_provider
-        .load_private_key(key)
-        .map_err(|error| Issue::new(at("key"), format!("unusable private key: {error}")))?;
-    let key = CertifiedKey::new(chain, signing);
-    match key.keys_match() {
-        // Some keys cannot tell their public key; the handshake still works with them.
-        Ok(()) | Err(TlsError::InconsistentKeys(InconsistentKeys::Unknown)) => {}
-        Err(TlsError::InconsistentKeys(InconsistentKeys::KeyMismatch)) => {
-            return Err(Issue::new(
-                format!("certificates.{name}"),
-                "the private key does not belong to the certificate",
-            ));
-        }
-        Err(error) => {
-            return Err(Issue::new(
-                at("cert"),
-                format!("unusable certificate: {error}"),
-            ));
-        }
-    }
+    let key = certify(provider, chain, key, &format!("certificates.{name}"))?;
     Ok(Loaded {
         key: Arc::new(key),
         info,
     })
+}
+
+/// Pairs `chain` with `key` and checks that the key belongs to the leaf certificate. Problems
+/// come with paths under `at`: `<at>.cert`, `<at>.key` or `at` itself.
+fn certify(
+    provider: &CryptoProvider,
+    chain: Vec<CertificateDer<'static>>,
+    key: PrivateKeyDer<'static>,
+    at: &str,
+) -> Result<CertifiedKey, Issue> {
+    let signing = provider
+        .key_provider
+        .load_private_key(key)
+        .map_err(|error| {
+            Issue::new(
+                format!("{at}.key"),
+                format!("unusable private key: {error}"),
+            )
+        })?;
+    let key = CertifiedKey::new(chain, signing);
+    match key.keys_match() {
+        // Some keys cannot tell their public key; the handshake still works with them.
+        Ok(()) | Err(TlsError::InconsistentKeys(InconsistentKeys::Unknown)) => Ok(key),
+        Err(TlsError::InconsistentKeys(InconsistentKeys::KeyMismatch)) => Err(Issue::new(
+            at,
+            "the private key does not belong to the certificate",
+        )),
+        Err(error) => Err(Issue::new(
+            format!("{at}.cert"),
+            format!("unusable certificate: {error}"),
+        )),
+    }
+}
+
+/// A certificate chain and its private key, which zora presents to upstreams that ask for one.
+pub struct ClientCertificate {
+    /// The chain, leaf first.
+    pub chain: Vec<CertificateDer<'static>>,
+    /// The private key, in a format that can be told from its bytes alone.
+    pub key: PrivateKeyDer<'static>,
+}
+
+/// Reads the client certificate in the PEM files at `cert` and `key` and checks that the key
+/// belongs to it. Problems come with paths under `at`.
+pub(crate) fn load_client_certificate(
+    provider: &CryptoProvider,
+    cert: &Path,
+    key: &Path,
+    at: &str,
+) -> Result<ClientCertificate, Issue> {
+    let chain = read_chain(cert)
+        .and_then(|chain| check_certificates(cert, chain))
+        .map_err(|e| Issue::new(format!("{at}.cert"), e))?;
+    let key = read_key(key).map_err(|e| Issue::new(format!("{at}.key"), e))?;
+    // Pingora tells the format of the key from its bytes, and panics if it cannot.
+    if PrivateKeyDer::try_from(key.secret_der()).is_err() {
+        return Err(Issue::new(
+            format!("{at}.key"),
+            "unsupported private key format",
+        ));
+    }
+    certify(provider, chain.clone(), key.clone_key(), at)?;
+    Ok(ClientCertificate { chain, key })
+}
+
+/// Reads the certificate authorities in the PEM file at `path`.
+pub(crate) fn load_authorities(path: &Path) -> Result<Vec<CertificateDer<'static>>, String> {
+    read_chain(path).and_then(|certificates| check_certificates(path, certificates))
+}
+
+/// Checks that each of `certificates`, read from `path`, is an X.509 certificate.
+fn check_certificates(
+    path: &Path,
+    certificates: Vec<CertificateDer<'static>>,
+) -> Result<Vec<CertificateDer<'static>>, String> {
+    for certificate in &certificates {
+        if let Err(error) = x509_parser::parse_x509_certificate(certificate) {
+            return Err(format!(
+                "invalid certificate in {}: {error}",
+                path.display()
+            ));
+        }
+    }
+    Ok(certificates)
 }
 
 /// Reads the certificate chain in the PEM file at `path`.
@@ -242,5 +306,46 @@ pub(crate) mod tests {
             mismatch.message,
             "the private key does not belong to the certificate"
         );
+    }
+
+    /// A client certificate comes with its key; a key of another certificate is reported at
+    /// the TLS settings.
+    #[test]
+    fn reads_client_certificates() {
+        let dir = TempDir::new().unwrap();
+        write_certificate(dir.path(), "zora", &["zora.test"]);
+        write_certificate(dir.path(), "other", &["other.test"]);
+        let read = |cert: &str, key: &str| {
+            load_client_certificate(
+                &provider(),
+                &dir.path().join(cert),
+                &dir.path().join(key),
+                "upstreams.api.tls",
+            )
+        };
+        let client = read("zora.crt", "zora.key").unwrap();
+        assert_eq!(client.chain.len(), 1);
+        let mismatch = read("zora.crt", "other.key").err().unwrap();
+        assert_eq!(mismatch.path, "upstreams.api.tls");
+        let missing = read("zora.crt", "missing.key").err().unwrap();
+        assert_eq!(missing.path, "upstreams.api.tls.key");
+    }
+
+    /// Certificate authorities are read from PEM; a file without certificates or with a
+    /// malformed one is rejected.
+    #[test]
+    fn reads_certificate_authorities() {
+        let dir = TempDir::new().unwrap();
+        write_certificate(dir.path(), "ca", &["ca.test"]);
+        assert_eq!(
+            load_authorities(&dir.path().join("ca.crt")).unwrap().len(),
+            1
+        );
+        let none = load_authorities(&dir.path().join("ca.key")).unwrap_err();
+        assert!(none.starts_with("no certificate found"), "{none}");
+        let garbage = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n";
+        std::fs::write(dir.path().join("bad.crt"), garbage).unwrap();
+        let bad = load_authorities(&dir.path().join("bad.crt")).unwrap_err();
+        assert!(bad.starts_with("invalid certificate"), "{bad}");
     }
 }

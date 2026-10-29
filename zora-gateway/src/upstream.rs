@@ -13,10 +13,14 @@ use pingora::lb::discovery::ServiceDiscovery;
 use pingora::lb::selection::{BackendIter, BackendSelection, Consistent, Random, RoundRobin};
 use pingora::lb::{Backend, Backends, LoadBalancer};
 use pingora::protocols::l4::socket::SocketAddr as PeerAddr;
+use pingora::protocols::tls::ALPN;
 use pingora::upstreams::peer::HttpPeer;
 use zora_core::config::{
     Balance, HashKey, Name, RouteTimeouts, Target, TargetAddress, Timeouts, Upstream,
+    UpstreamProtocol,
 };
+
+use crate::upstream_tls::PeerTls;
 
 /// How many targets a selection may look at before it gives up.
 const SELECT_ATTEMPTS: usize = 16;
@@ -24,6 +28,8 @@ const SELECT_ATTEMPTS: usize = 16;
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(10);
 /// How often the host names of an upstream are resolved again.
 const RESOLVE_INTERVAL: Duration = Duration::from_secs(30);
+/// Requests that share one HTTP/2 connection to a target at the same time; Pingora allows one.
+const H2_STREAMS: usize = 100;
 
 /// An upstream as the routes of one snapshot use it: the shared runtime and the settings of
 /// this configuration.
@@ -36,16 +42,26 @@ pub(crate) struct CompiledUpstream {
     timeouts: Timeouts,
     /// How many other targets a request tries when it cannot connect.
     retries: u32,
+    /// The protocol spoken with the targets.
+    protocol: UpstreamProtocol,
+    /// TLS to the targets, if any.
+    tls: Option<PeerTls>,
 }
 
 impl CompiledUpstream {
-    /// Puts the settings of `upstream` on `runtime`.
-    pub(crate) fn new(runtime: Arc<UpstreamRuntime>, upstream: &Upstream) -> Self {
+    /// Puts the settings of `upstream` on `runtime`, with the TLS files read into `tls`.
+    pub(crate) fn new(
+        runtime: Arc<UpstreamRuntime>,
+        upstream: &Upstream,
+        tls: Option<PeerTls>,
+    ) -> Self {
         Self {
             runtime,
             hash_key: (upstream.balance() == Balance::ConsistentHash).then(|| upstream.hash_key()),
             timeouts: upstream.timeouts,
             retries: upstream.retries(),
+            protocol: upstream.protocol(),
+            tls,
         }
     }
 
@@ -61,12 +77,25 @@ impl CompiledUpstream {
 
     /// Returns the peer that sends a request of a route with time limits `route` to `target`.
     pub(crate) fn peer(&self, target: &Backend, route: &RouteTimeouts) -> HttpPeer {
-        let mut peer = HttpPeer::new(target.clone(), false, String::new());
+        let sni = self
+            .tls
+            .as_ref()
+            .map(|tls| tls.sni(target))
+            .unwrap_or_default();
+        let mut peer = HttpPeer::new(target.clone(), false, sni);
+        if let Some(tls) = &self.tls {
+            tls.configure(&mut peer);
+        }
         let options = &mut peer.options;
         options.total_connection_timeout = Some(self.timeouts.connect().get());
         options.read_timeout = Some(route.read.unwrap_or(self.timeouts.read()).get());
         options.write_timeout = Some(route.write.unwrap_or(self.timeouts.write()).get());
         options.idle_timeout = Some(self.timeouts.idle().get());
+        // HTTP/2 only: over TLS through ALPN, without TLS from the first byte.
+        if matches!(self.protocol, UpstreamProtocol::H2 | UpstreamProtocol::H2c) {
+            options.alpn = ALPN::H2;
+            options.max_h2_streams = H2_STREAMS;
+        }
         peer
     }
 }
@@ -161,6 +190,10 @@ impl UpstreamRuntime {
     }
 }
 
+/// The host name that a target was resolved from, which TLS sends and checks by default.
+#[derive(Clone)]
+pub(crate) struct TargetHost(pub(crate) Arc<str>);
+
 /// Resolves the host names of `targets` every 30 seconds while the runtime lives.
 async fn keep_resolving(runtime: Weak<UpstreamRuntime>) {
     let start = tokio::time::Instant::now() + RESOLVE_INTERVAL;
@@ -181,10 +214,10 @@ async fn resolve(targets: &[Target]) -> Result<BTreeSet<Backend>, Vec<(usize, St
     let mut backends = BTreeSet::new();
     let mut problems = Vec::new();
     for (index, target) in targets.iter().enumerate() {
-        let addresses = match &target.address {
-            TargetAddress::Ip(address) => vec![*address],
+        let (addresses, host) = match &target.address {
+            TargetAddress::Ip(address) => (vec![*address], None),
             TargetAddress::Name { host, port } => match lookup(host, *port).await {
-                Ok(addresses) => addresses,
+                Ok(addresses) => (addresses, Some(TargetHost(host.as_str().into()))),
                 Err(problem) => {
                     problems.push((index, problem));
                     continue;
@@ -193,7 +226,10 @@ async fn resolve(targets: &[Target]) -> Result<BTreeSet<Backend>, Vec<(usize, St
         };
         for address in addresses {
             match Backend::new_with_weight(&address.to_string(), target.weight as usize) {
-                Ok(backend) => {
+                Ok(mut backend) => {
+                    if let Some(host) = &host {
+                        backend.ext.insert(host.clone());
+                    }
                     backends.insert(backend);
                 }
                 Err(error) => problems.push((index, error.to_string())),
@@ -570,11 +606,15 @@ mod tests {
             .map(|target| Target::new(target.parse().unwrap()))
             .collect();
         let backends = resolve(&targets).await.unwrap();
-        assert!(
-            backends
-                .iter()
-                .any(|backend| backend.addr.as_inet().is_some_and(|a| a.port() == 80))
-        );
+        let named: Vec<_> = backends
+            .iter()
+            .filter(|backend| backend.addr.as_inet().is_some_and(|a| a.port() == 80))
+            .collect();
+        assert!(!named.is_empty());
+        for backend in named {
+            let host = backend.ext.get::<TargetHost>().map(|host| &*host.0);
+            assert_eq!(host, Some("localhost"));
+        }
         let unknown = vec![
             Target::new("127.0.0.1:81".parse().unwrap()),
             Target::new("unknown.invalid:80".parse().unwrap()),
