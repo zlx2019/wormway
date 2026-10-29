@@ -132,7 +132,9 @@ async fn serve(setup: Setup, data_plane: Handle) -> anyhow::Result<ExitCode> {
     let listener = TcpListener::bind(admin_addr)
         .await
         .with_context(|| format!("cannot listen on {admin_addr} for the Admin API"))?;
-    info!(addr = %listener.local_addr()?, "Admin API listening");
+    let local = listener.local_addr()?;
+    info!(addr = %local, "Admin API listening");
+    info!("dashboard at http://{local}/ui/");
     if !admin_addr.ip().is_loopback() {
         warn!(
             addr = %admin_addr,

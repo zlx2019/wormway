@@ -15,6 +15,10 @@ use super::Admin;
 use super::error::ApiError;
 use crate::store::{ChangeSource, SavedVersion};
 
+/// Header naming the client that makes a change: `api` (the default), `ui` or `cli`. It is
+/// saved as the source of the new version.
+const CLIENT_HEADER: &str = "zora-client";
+
 /// Body of `PUT /api/v1/config` and `POST /api/v1/config/validate`.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -112,10 +116,18 @@ pub(crate) async fn replace(
     body: Result<Json<ConfigRequest>, JsonRejection>,
 ) -> Result<Json<ChangeResponse>, ApiError> {
     let Json(request) = body?;
+    let source = change_source(&headers)?;
     admin.require_database_source()?;
     let mut current = admin.current.lock().await;
     check_if_match(&headers, *current)?;
-    let response = change(&admin, &mut current, request.config, &request.comment).await?;
+    let response = change(
+        &admin,
+        &mut current,
+        request.config,
+        source,
+        &request.comment,
+    )
+    .await?;
     Ok(Json(response))
 }
 
@@ -152,6 +164,7 @@ pub(crate) async fn rollback(
     id: Result<Path<i64>, PathRejection>,
 ) -> Result<Json<ChangeResponse>, ApiError> {
     let Path(id) = id?;
+    let source = change_source(&headers)?;
     admin.require_database_source()?;
     let mut current = admin.current.lock().await;
     check_if_match(&headers, *current)?;
@@ -161,7 +174,9 @@ pub(crate) async fn rollback(
         .await?
         .ok_or_else(|| ApiError::not_found(format!("configuration version {id}")))?;
     let comment = format!("rollback to version {id}");
-    Ok(Json(change(&admin, &mut current, config, &comment).await?))
+    Ok(Json(
+        change(&admin, &mut current, config, source, &comment).await?,
+    ))
 }
 
 /// Saves `config` as a new version and switches to it, unless it is already in effect.
@@ -172,6 +187,7 @@ async fn change(
     admin: &Admin,
     current: &mut Option<i64>,
     config: DynamicConfig,
+    source: ChangeSource,
     comment: &str,
 ) -> Result<ChangeResponse, ApiError> {
     let running = admin.server.snapshot();
@@ -184,20 +200,35 @@ async fn change(
     let mut next = running.config.clone();
     next.set_dynamic(config.clone());
     let prepared = admin.server.prepare(next).await?;
-    let saved = admin
-        .store
-        .save_version(&config, ChangeSource::Api, comment)
-        .await?;
+    let saved = admin.store.save_version(&config, source, comment).await?;
     prepared.commit();
     *current = Some(saved.id);
     info!(
         version = saved.id,
+        ?source,
         "configuration changed through the Admin API"
     );
     Ok(ChangeResponse {
         version: Some(saved.id),
         changed: true,
     })
+}
+
+/// Returns who makes a change, from the `Zora-Client` header.
+fn change_source(headers: &HeaderMap) -> Result<ChangeSource, ApiError> {
+    let Some(value) = headers.get(CLIENT_HEADER) else {
+        return Ok(ChangeSource::Api);
+    };
+    match value.as_bytes() {
+        b"api" => Ok(ChangeSource::Api),
+        b"ui" => Ok(ChangeSource::Ui),
+        b"cli" => Ok(ChangeSource::Cli),
+        _ => Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "the Zora-Client header must be api, ui or cli",
+        )),
+    }
 }
 
 /// Checks an `If-Match` header, if present, against the saved version in effect. It holds a

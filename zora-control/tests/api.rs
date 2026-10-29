@@ -378,6 +378,45 @@ async fn rolls_back_to_older_versions() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
+/// The `Zora-Client` header is saved as the source of a change; unknown clients are refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn records_the_client_of_a_change() {
+    let harness = Harness::start("db").await;
+    let ui = [("zora-client", "ui")];
+    harness
+        .put_config(listener("web", "127.0.0.1:0"), &ui)
+        .await;
+    harness
+        .put_config(listener("api", "127.0.0.1:0"), &[])
+        .await;
+    let (status, _, body) = harness
+        .call(
+            "POST",
+            "/api/v1/config/versions/1/rollback",
+            None,
+            &[("zora-client", "cli")],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (_, body) = harness.get("/api/v1/config/versions").await;
+    let sources: Vec<_> = body["versions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["source"].clone())
+        .collect();
+    assert_eq!(sources, [json!("cli"), json!("api"), json!("ui")]);
+
+    let (status, body) = harness
+        .put_config(
+            listener("other", "127.0.0.1:0"),
+            &[("zora-client", "browser")],
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "invalid_request");
+}
+
 /// Validation checks settings without saving or applying them.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn validates_without_applying() {

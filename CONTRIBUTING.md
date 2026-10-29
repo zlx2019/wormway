@@ -23,6 +23,8 @@ typos
 
 All of these run in CI and must pass.
 
+Changes to the dashboard in `ui/` also need Node.js 22.22 or later and pnpm 10. After `pnpm --dir ui install`, run `pnpm --dir ui lint` (Biome: lint and formatting) and `pnpm --dir ui build` (type check and build); CI runs both.
+
 ### Git hooks
 
 Install the hooks once with `pre-commit install`. It sets up three hooks:
@@ -72,6 +74,7 @@ zora 处于发布前阶段，由一人维护。
 - 动手前先开 issue 或 discussion 对齐范围。范围刻意收窄：首版不做代理客户端、HTTP/3、Kubernetes 控制器、WAF、AI 网关和 Wasm 插件。
 - 响应时间是尽力而为，不在当前里程碑内的 PR 可能被暂缓或拒绝。
 - 开发命令见上文，CI 中全部要通过。建议运行一次 `pre-commit install` 安装 Git 钩子：提交时检查文件格式、`cargo fmt` 和拼写，并校验提交信息是否符合 Conventional Commits；推送前运行 clippy、测试、文档构建和 `cargo deny`。
+- 改 `ui/` 里的面板还需要 Node.js 22.22 及以上和 pnpm 10：`pnpm --dir ui install` 之后运行 `pnpm --dir ui lint`（Biome 检查代码与格式）和 `pnpm --dir ui build`（类型检查与构建），CI 也会运行这两步。
 - 代码约定：edition 2024；库用 `thiserror`，二进制才用 `anyhow`；测试与原型之外禁用 `.unwrap()`；async 里不做阻塞调用；公共 API 不暴露 Pingora、quinn 等底层类型；单元测试写在模块末尾的 `#[cfg(test)]`，集成测试放 `tests/`，用 cargo-nextest 运行。
 - 项目内的所有注释（源码注释、文档注释、配置文件注释）一律使用英文，且每个函数都要有文档注释。
 - 新依赖要在 PR 里说明理由；许可证必须与 MIT 兼容（`cargo deny check` 会检查），不接受 GPL、AGPL、LGPL 代码。

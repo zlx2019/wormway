@@ -16,6 +16,18 @@ updates:
     commit-message:
       prefix: "chore(deps)"
 
+  # Dashboard dependencies (pnpm): weekly, with minor and patch updates grouped into one PR
+  - package-ecosystem: npm
+    directory: /ui
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
+    commit-message:
+      prefix: "chore(deps)"
+
   # GitHub Actions: keep the hash pins while following new versions
   - package-ecosystem: github-actions
     directory: /

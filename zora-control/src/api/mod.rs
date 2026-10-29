@@ -68,7 +68,8 @@ impl Admin {
         }))
     }
 
-    /// Returns the routes of the API. Everything except `/healthz` needs the token.
+    /// Returns the routes of the API, and of the dashboard with the `ui` feature. Everything
+    /// except `/healthz` and the dashboard files needs the token.
     pub fn router(self: &Arc<Self>) -> Router {
         let protected = Router::new()
             .route("/api/v1/status", get(status::status))
@@ -85,9 +86,12 @@ impl Admin {
                 self.clone(),
                 auth::authorize,
             ));
-        Router::new()
+        let router = Router::new()
             .route("/healthz", get(status::healthz))
-            .merge(protected)
+            .merge(protected);
+        #[cfg(feature = "ui")]
+        let router = router.merge(crate::ui::routes::<crate::ui::Dist, _>());
+        router
             .fallback(error::not_found)
             .method_not_allowed_fallback(error::method_not_allowed)
             .with_state(self.clone())
