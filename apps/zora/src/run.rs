@@ -1,4 +1,5 @@
-//! `zora run`: serves until a shutdown signal and reloads the configuration file on SIGHUP.
+//! `zora run`: serves until a shutdown signal, and reloads the configuration and certificate
+//! files on SIGHUP.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -14,7 +15,8 @@ use tracing::{error, info, warn};
 use zora_control::{Admin, AdminToken, Metrics, Store};
 use zora_core::config::{AdminSettings, Config, ConfigError, ConfigSource, DynamicConfig};
 use zora_gateway::Gateway;
-use zora_runtime::{Server, Services};
+use zora_runtime::{ApplyError, Server, Services, Snapshot};
+use zora_tls::Certificates;
 
 use crate::signals::{Signal, Signals};
 use crate::{ADMIN_TOKEN_ENV, load, logging};
@@ -99,11 +101,14 @@ fn data_plane(threads: usize) -> std::io::Result<Runtime> {
     builder.build()
 }
 
-/// Service factories and engines of the protocols built into this binary: the HTTP gateway.
-/// `threads` is the number of data-plane workers.
-fn services(threads: usize) -> Services {
+/// Service factories and engines of the protocols built into this binary: the certificates and
+/// the HTTP gateway. `threads` is the number of data-plane workers; relative certificate paths
+/// are resolved against `config_dir`.
+fn services(threads: usize, config_dir: &Path) -> Services {
     let mut services = Services::new();
-    Gateway::new(threads).register(&mut services);
+    let certificates = Certificates::new(config_dir);
+    certificates.register(&mut services);
+    Gateway::new(threads, certificates).register(&mut services);
     services
 }
 
@@ -126,8 +131,8 @@ async fn serve(setup: Setup, data_plane: Handle) -> anyhow::Result<ExitCode> {
     if config.config.source == ConfigSource::Db {
         config.set_dynamic(saved_dynamic(&store).await?);
     }
-    let threads = data_plane.metrics().num_workers();
-    let server = Arc::new(Server::start(data_plane, services(threads), config).await?);
+    let services = services(data_plane.metrics().num_workers(), load::config_dir(&path));
+    let server = Arc::new(Server::start(data_plane, services, config).await?);
     let admin = Admin::new(server.clone(), store.clone(), token, metrics).await?;
     let listener = TcpListener::bind(admin_addr)
         .await
@@ -210,12 +215,16 @@ async fn next_shutdown(signals: &mut Signals) {
     while signals.next().await != Signal::Shutdown {}
 }
 
-/// Rereads the configuration file and applies its dynamic settings. On any problem the
-/// configuration in effect stays and the problem is logged.
+/// Rereads the configuration file and applies its dynamic settings, or with dynamic settings
+/// from the database applies the settings in effect again. Either way the certificate files are
+/// read again. On any problem the configuration in effect stays and the problem is logged.
 async fn reload(server: &Server, path: &Path) {
     let running = server.snapshot();
     if running.config.config.source != ConfigSource::File {
-        info!("SIGHUP ignored: dynamic settings come from the database (config.source = \"db\")");
+        info!(
+            "reloading the certificate files; dynamic settings come from the database (config.source = \"db\")"
+        );
+        report_reload(server, server.reapply().await).await;
         return;
     }
     info!(file = %path.display(), "reloading");
@@ -235,7 +244,12 @@ async fn reload(server: &Server, path: &Path) {
     }
     let mut next = running.config.clone();
     next.set_dynamic(file.into_dynamic());
-    match server.apply(next).await {
+    report_reload(server, server.apply(next).await).await;
+}
+
+/// Logs the outcome of a reload.
+async fn report_reload(server: &Server, result: Result<Arc<Snapshot>, ApplyError>) {
+    match result {
         Ok(snapshot) => info!(
             config_version = snapshot.version,
             listeners = server.listeners().await.len(),

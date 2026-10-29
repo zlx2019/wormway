@@ -48,6 +48,12 @@ fn check_listeners(config: &Config, issues: &mut Vec<Issue>) {
             ));
         }
         let Some(tls) = &listener.tls else { continue };
+        if listener.http.h2c() {
+            issues.push(Issue::new(
+                format!("listeners.{name}.http.h2c"),
+                "only for listeners without TLS, which agree on HTTP/2 during the handshake",
+            ));
+        }
         if tls.certificates.is_empty() {
             issues.push(Issue::new(
                 format!("listeners.{name}.tls.certificates"),
@@ -262,6 +268,29 @@ mod tests {
         assert_eq!(issues[2].message, "unknown upstream \"nowhere\"");
         assert_eq!(issues[3].message, "10.0.0.1:80 is listed twice");
         assert_eq!(issues[4].message, "must be between 1 and 256");
+    }
+
+    /// h2c is for listeners without TLS only.
+    #[test]
+    fn keeps_h2c_off_tls_listeners() {
+        let config = parse(
+            r#"
+            version = 1
+            [listeners.web]
+            listen = ["127.0.0.1:8080"]
+            protocol = "http"
+            http = { h2c = true }
+            [listeners.secure]
+            listen = ["127.0.0.1:8443"]
+            protocol = "http"
+            tls = { certificates = ["site"], unknown_sni = "reject" }
+            http = { h2c = true }
+            [certificates.site]
+            cert = "site.crt"
+            key = "site.key"
+            "#,
+        );
+        assert_eq!(paths(&errors(&config)), ["listeners.secure.http.h2c"]);
     }
 
     /// Dynamic tables in the file are flagged in db mode and used silently in file mode.

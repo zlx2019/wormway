@@ -3,7 +3,7 @@
 /// What a signal asks for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Signal {
-    /// SIGHUP: reload the configuration file.
+    /// SIGHUP: reload the configuration and certificate files.
     Reload,
     /// SIGINT or SIGTERM: shut down.
     Shutdown,

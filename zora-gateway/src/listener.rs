@@ -1,4 +1,5 @@
-//! The HTTP listeners: each one gets its own Pingora proxy, so that it can drain on its own.
+//! The HTTP listeners: each one gets its own Pingora proxy, so that it can drain on its own, and
+//! listeners with TLS their own TLS settings.
 
 use std::any::Any;
 use std::os::unix::io::AsRawFd;
@@ -8,15 +9,23 @@ use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use pingora::apps::{HttpServerApp, HttpServerOptions, ServerApp};
+use pingora::listeners::tls::Acceptor;
 use pingora::protocols::l4::stream::Stream as L4Stream;
 use pingora::protocols::{GetSocketDigest, SocketDigest, Stream};
 use pingora::proxy::{HttpProxy, http_proxy};
 use pingora::server::configuration::ServerConf;
+use tracing::debug;
 use zora_core::config::{Listener, Name};
 use zora_runtime::{BoxError, BoxFuture, Connection, Service, ServiceFactory, Shutdown};
+use zora_tls::Certificates;
 
 use crate::proxy::Proxy;
 use crate::snapshot::GatewaySnapshot;
+
+/// Application protocols that listeners with TLS offer, in order of preference.
+const ALPN: [&[u8]; 2] = [b"h2", b"http/1.1"];
+/// How long a client may take to complete the TLS handshake.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Builds the service of each HTTP listener.
 pub(crate) struct HttpListeners {
@@ -24,21 +33,36 @@ pub(crate) struct HttpListeners {
     snapshot: Arc<ArcSwap<GatewaySnapshot>>,
     /// Pingora settings of every proxy.
     conf: Arc<ServerConf>,
+    /// Certificates of the listeners with TLS.
+    certificates: Certificates,
 }
 
 impl HttpListeners {
     /// Creates the factory.
-    pub(crate) fn new(snapshot: Arc<ArcSwap<GatewaySnapshot>>, conf: Arc<ServerConf>) -> Self {
-        Self { snapshot, conf }
+    pub(crate) fn new(
+        snapshot: Arc<ArcSwap<GatewaySnapshot>>,
+        conf: Arc<ServerConf>,
+        certificates: Certificates,
+    ) -> Self {
+        Self {
+            snapshot,
+            conf,
+            certificates,
+        }
     }
 }
 
 impl ServiceFactory for HttpListeners {
-    /// Builds a Pingora proxy with the HTTP settings of the listener.
+    /// Builds a Pingora proxy with the HTTP settings of the listener, and its TLS settings if it
+    /// has TLS.
     fn create(&self, name: &Name, listener: &Listener) -> Result<Arc<dyn Service>, BoxError> {
-        if listener.tls.is_some() {
-            return Err("TLS listeners are not available yet".into());
-        }
+        let tls = match listener.tls {
+            Some(_) => {
+                let config = self.certificates.server_config(name, &ALPN)?;
+                Some(Acceptor::from_server_config(config))
+            }
+            None => None,
+        };
         let keepalive = KeepAlive::new(listener.http.keepalive_timeout().get());
         let app = Proxy::new(name.clone(), self.snapshot.clone(), keepalive.http1);
         // Pingora loads the system root certificates for its upstream connector here, and
@@ -52,10 +76,13 @@ impl ServiceFactory for HttpListeners {
                 )
             })?;
         let mut options = HttpServerOptions::default();
+        // Pingora ignores h2c on TLS connections, which agree on HTTP/2 through ALPN.
+        options.h2c = listener.http.h2c();
         options.h2_idle_timeout = Some(keepalive.http2);
         proxy.server_options = Some(options);
         Ok(Arc::new(HttpService {
             proxy: Arc::new(proxy),
+            tls,
         }))
     }
 }
@@ -96,18 +123,37 @@ impl KeepAlive {
 struct HttpService {
     /// The proxy.
     proxy: Arc<HttpProxy<Proxy>>,
+    /// The TLS handshake of a listener with TLS.
+    tls: Option<Acceptor>,
 }
 
 impl Service for HttpService {
-    /// Serves HTTP/1.1, with keep-alive, or HTTP/2 until the connection ends.
+    /// Completes the TLS handshake if the listener has TLS, then serves HTTP/1.1, with
+    /// keep-alive, or HTTP/2 until the connection ends.
     fn serve(self: Arc<Self>, conn: Connection, shutdown: Shutdown) -> BoxFuture<'static> {
         Box::pin(async move {
+            let peer = conn.peer;
+            let stream = l4_stream(conn);
+            let stream: Stream = match &self.tls {
+                None => Box::new(stream),
+                Some(acceptor) => {
+                    let handshake = acceptor.tls_handshake(stream);
+                    match tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake).await {
+                        Ok(Ok(tls)) => Box::new(tls),
+                        Ok(Err(error)) => {
+                            debug!(%peer, %error, "TLS handshake failed");
+                            return;
+                        }
+                        Err(_) => {
+                            debug!(%peer, "TLS handshake timed out");
+                            return;
+                        }
+                    }
+                }
+            };
             // Pingora serves every request of the connection in this call and returns nothing
             // for HTTP.
-            let _ = self
-                .proxy
-                .process_new(pingora_stream(conn), &shutdown)
-                .await;
+            let _ = self.proxy.process_new(stream, &shutdown).await;
         })
     }
 
@@ -119,13 +165,13 @@ impl Service for HttpService {
 }
 
 /// Turns an accepted connection into a Pingora stream that knows the address of its client.
-fn pingora_stream(conn: Connection) -> Stream {
+fn l4_stream(conn: Connection) -> L4Stream {
     let mut stream = L4Stream::from(conn.stream);
     // The same digest as Pingora's own listeners set up, so that `client_addr()` works.
     let digest = SocketDigest::from_raw_fd(stream.as_raw_fd());
     let _ = digest.peer_addr.set(Some(conn.peer.into()));
     stream.set_socket_digest(digest);
-    Box::new(stream)
+    stream
 }
 
 #[cfg(test)]

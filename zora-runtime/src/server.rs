@@ -125,6 +125,20 @@ impl Server {
         Ok(self.prepare(config).await?.commit())
     }
 
+    /// Applies the configuration in effect again, so that engines read their sources again,
+    /// such as certificate files. Listeners whose settings did not change keep running
+    /// untouched. A change that another caller commits meanwhile is kept, not undone.
+    pub async fn reapply(&self) -> Result<Arc<Snapshot>, ApplyError> {
+        let state = self.state.lock().await;
+        // Read under the lock, so that it is the newest configuration.
+        let config = self.snapshot.load().config.clone();
+        let prepared = self.prepare_locked(state, config).await;
+        if prepared.is_err() {
+            telemetry::config_applied(false);
+        }
+        Ok(prepared?.commit())
+    }
+
     /// Returns the configuration in effect.
     pub fn snapshot(&self) -> Arc<Snapshot> {
         self.snapshot.load_full()
@@ -167,6 +181,15 @@ impl Server {
     async fn try_prepare(&self, config: Config) -> Result<Prepared<'_>, ApplyError> {
         self.validate(&config)?;
         let state = self.state.lock().await;
+        self.prepare_locked(state, config).await
+    }
+
+    /// Prepares the engines and plans the switch to `config` with the state already held.
+    async fn prepare_locked<'a>(
+        &'a self,
+        state: MutexGuard<'a, State>,
+        config: Config,
+    ) -> Result<Prepared<'a>, ApplyError> {
         if state.closed {
             return Err(ApplyError::ShuttingDown);
         }

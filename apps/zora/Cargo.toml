@@ -21,6 +21,10 @@ zora-control = { workspace = true, features = ["ui"] }
 zora-core = { workspace = true, features = ["schema"] }
 zora-gateway.workspace = true
 zora-runtime.workspace = true
+zora-tls.workspace = true
+
+[dev-dependencies]
+rcgen.workspace = true
 
 [lints]
 workspace = true

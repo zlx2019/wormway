@@ -52,6 +52,18 @@ fn upstream(body: &'static str) -> SocketAddr {
     addr
 }
 
+/// Writes a self-signed certificate for `zora.test` and its key into `dir` as `<file>.crt` and
+/// `<file>.key`.
+fn write_certificate(dir: &Path, file: &str) {
+    let key = rcgen::KeyPair::generate().expect("key");
+    let cert = rcgen::CertificateParams::new(vec!["zora.test".to_owned()])
+        .expect("certificate parameters")
+        .self_signed(&key)
+        .expect("certificate");
+    std::fs::write(dir.join(format!("{file}.crt")), cert.pem()).expect("write the certificate");
+    std::fs::write(dir.join(format!("{file}.key")), key.serialize_pem()).expect("write the key");
+}
+
 /// Sends `GET path` with an optional token to the Admin API at `addr`, and returns the status
 /// code and the body.
 fn get(addr: &str, path: &str, token: Option<&str>) -> (u16, String) {
@@ -268,6 +280,30 @@ fn proxies_http_requests() {
     assert_eq!(zora.exit_code(), Some(0));
 }
 
+/// SIGHUP with dynamic settings from the database applies them again, which reads the
+/// certificate files again. Relative paths are relative to the configuration file.
+#[test]
+fn reloads_certificate_files_on_sighup() {
+    let (mut zora, path, _) = start_for_config("run-certificates", "cli-token");
+    let dir = path.parent().expect("directory");
+    write_certificate(dir, "site");
+    let file = path.with_file_name("dynamic.toml");
+    let certificate = "[certificates.site]\ncert = \"site.crt\"\nkey = \"site.key\"\n";
+    std::fs::write(&file, format!("version = 1\n{certificate}")).expect("write");
+    let file_arg = file.to_str().expect("UTF-8 path");
+    let (code, _, err) = zora_config(&path, "cli-token", &["apply", "-f", file_arg]);
+    assert_eq!(code, Some(0), "{err}");
+    zora.wait_for("certificate loaded certificate=site");
+
+    write_certificate(dir, "site");
+    zora.signal("HUP");
+    zora.wait_for("reloading the certificate files");
+    zora.wait_for("certificate loaded certificate=site");
+    zora.wait_for("configuration reloaded");
+    zora.signal("TERM");
+    assert_eq!(zora.exit_code(), Some(0));
+}
+
 /// When Pingora cannot load the system root certificates, the listener fails with the reason
 /// instead of crashing the process.
 #[test]
@@ -352,6 +388,7 @@ fn applies_and_exports_dynamic_settings() {
 
     let file = path.with_file_name("dynamic.toml");
     let file_arg = file.to_str().expect("UTF-8 path");
+    write_certificate(path.parent().expect("directory"), "example");
     let certificate = "[certificates.example]\ncert = \"example.crt\"\nkey = \"example.key\"\n";
     std::fs::write(&file, format!("version = 1\n{certificate}")).expect("write");
     let apply = ["apply", "-f", file_arg, "-m", "from the command line"];

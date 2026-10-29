@@ -5,7 +5,8 @@
 //! of protocol `http`, which gives every listener its own Pingora proxy, and an engine that
 //! compiles the routes and upstreams of each configuration into a snapshot shared by all
 //! listeners. Every request takes the snapshot in effect when it starts and keeps it until it
-//! ends. Pingora types do not appear in the public API.
+//! ends. Listeners with TLS present the certificates of [`Certificates`] and agree on HTTP/2 or
+//! HTTP/1.1 during the handshake. Pingora types do not appear in the public API.
 
 mod listener;
 mod proxy;
@@ -18,6 +19,7 @@ use arc_swap::ArcSwap;
 use pingora::server::configuration::ServerConf;
 use zora_core::config::Protocol;
 use zora_runtime::Services;
+use zora_tls::Certificates;
 
 use crate::listener::HttpListeners;
 use crate::snapshot::{GatewaySnapshot, Routing};
@@ -28,12 +30,15 @@ pub struct Gateway {
     snapshot: Arc<ArcSwap<GatewaySnapshot>>,
     /// Pingora settings of every proxy.
     conf: Arc<ServerConf>,
+    /// Certificates of the listeners with TLS.
+    certificates: Certificates,
 }
 
 impl Gateway {
-    /// Creates a gateway for a data plane with `threads` worker threads. The number sizes the
-    /// pools of idle upstream connections.
-    pub fn new(threads: usize) -> Self {
+    /// Creates a gateway for a data plane with `threads` worker threads, whose listeners with
+    /// TLS present `certificates`. The number of threads sizes the pools of idle upstream
+    /// connections.
+    pub fn new(threads: usize, certificates: Certificates) -> Self {
         let conf = ServerConf {
             threads: threads.max(1),
             ..ServerConf::default()
@@ -41,16 +46,16 @@ impl Gateway {
         Self {
             snapshot: Arc::new(ArcSwap::from_pointee(GatewaySnapshot::default())),
             conf: Arc::new(conf),
+            certificates,
         }
     }
 
     /// Registers the gateway with `services`: the service factory of protocol `http` and the
-    /// engine of its routes and upstreams.
+    /// engine of its routes and upstreams. The engine of the certificates is registered on its
+    /// own, see [`Certificates::register`].
     pub fn register(self, services: &mut Services) {
-        services.register(
-            Protocol::Http,
-            HttpListeners::new(self.snapshot.clone(), self.conf),
-        );
+        let listeners = HttpListeners::new(self.snapshot.clone(), self.conf, self.certificates);
+        services.register(Protocol::Http, listeners);
         services.add_engine(Routing::new(self.snapshot));
     }
 }

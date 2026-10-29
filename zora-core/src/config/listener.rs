@@ -47,8 +47,34 @@ impl fmt::Display for Protocol {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ListenerTls {
-    /// Names of the certificates the listener can present. The client's SNI picks one.
+    /// Names of the certificates the listener can present. The host name the client sends (SNI)
+    /// picks the certificate whose names cover it; when several do, the one listed first.
     pub certificates: Vec<Name>,
+    /// What to do when the client sends a host name that no certificate covers, or none at all.
+    /// Default: `"default"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unknown_sni: Option<UnknownSni>,
+}
+
+impl ListenerTls {
+    /// Returns the handling of unknown host names in effect.
+    pub fn unknown_sni(&self) -> UnknownSni {
+        self.unknown_sni.unwrap_or_default()
+    }
+}
+
+/// Handling of a TLS handshake for a host name that no certificate of the listener covers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum UnknownSni {
+    /// Present the first certificate of the listener, as Nginx presents the certificate of its
+    /// default server.
+    #[default]
+    Default,
+    /// Fail the handshake, so that the certificates are not shown to clients that do not know a
+    /// host name they cover, such as scanners connecting by IP address.
+    Reject,
 }
 
 /// HTTP settings of a listener. Settings left out follow the defaults of the running zora.
@@ -62,6 +88,11 @@ pub struct HttpSettings {
     /// in Nginx.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keepalive_timeout: Option<Duration>,
+    /// Accept HTTP/2 without TLS from clients that start with it (prior knowledge), next to
+    /// HTTP/1.1. Only for listeners without TLS: those agree on HTTP/2 during the handshake
+    /// (ALPN). Default: `false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub h2c: Option<bool>,
 }
 
 impl HttpSettings {
@@ -72,6 +103,11 @@ impl HttpSettings {
     pub fn keepalive_timeout(&self) -> Duration {
         self.keepalive_timeout
             .unwrap_or(Self::DEFAULT_KEEPALIVE_TIMEOUT)
+    }
+
+    /// Whether HTTP/2 without TLS is accepted.
+    pub fn h2c(&self) -> bool {
+        self.h2c.unwrap_or(false)
     }
 
     /// Whether every setting is left out.

@@ -11,14 +11,21 @@ publish.workspace = true
 arc-swap.workspace = true
 async-trait.workspace = true
 pingora.workspace = true
+tokio = { workspace = true, features = ["time"] }
 tracing.workspace = true
 zora-core.workspace = true
 zora-runtime.workspace = true
+zora-tls.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
+h2.workspace = true
+rcgen.workspace = true
 reqwest.workspace = true
+rustls.workspace = true
+tempfile.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
+tokio-rustls.workspace = true
 
 [lints]
 workspace = true

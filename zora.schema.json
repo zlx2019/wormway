@@ -21,7 +21,7 @@
     },
     "Certificate": {
       "additionalProperties": false,
-      "description": "A certificate chain and its private key, read from PEM files.",
+      "description": "A certificate chain and its private key, read from PEM files. Relative paths are resolved\nagainst the directory of the configuration file. The files are read again whenever the\nconfiguration is applied, so that replaced files take effect on reload.",
       "properties": {
         "cert": {
           "description": "PEM file with the certificate chain, leaf certificate first.",
@@ -73,6 +73,13 @@
       "additionalProperties": false,
       "description": "HTTP settings of a listener. Settings left out follow the defaults of the running zora.",
       "properties": {
+        "h2c": {
+          "description": "Accept HTTP/2 without TLS from clients that start with it (prior knowledge), next to\nHTTP/1.1. Only for listeners without TLS: those agree on HTTP/2 during the handshake\n(ALPN). Default: `false`.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "keepalive_timeout": {
           "description": "How long a kept-alive HTTP/1.1 connection, or an idle HTTP/2 connection, may wait for its\nnext request before it is closed, rounded up to whole seconds. `\"0s\"` turns HTTP/1.1\nkeep-alive off and closes idle HTTP/2 connections after one second. Default: `\"75s\"`, as\nin Nginx.",
           "pattern": "^([0-9]+(ms|s|m|h|d))+$",
@@ -134,12 +141,23 @@
       "description": "TLS settings of a listener.",
       "properties": {
         "certificates": {
-          "description": "Names of the certificates the listener can present. The client's SNI picks one.",
+          "description": "Names of the certificates the listener can present. The host name the client sends (SNI)\npicks the certificate whose names cover it; when several do, the one listed first.",
           "items": {
             "pattern": "^[a-z0-9_-]{1,64}$",
             "type": "string"
           },
           "type": "array"
+        },
+        "unknown_sni": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/UnknownSni"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What to do when the client sends a host name that no certificate covers, or none at all.\nDefault: `\"default\"`."
         }
       },
       "required": [
@@ -306,6 +324,21 @@
         }
       ],
       "description": "A server of an upstream: its address, such as \"10.0.0.1:8080\", or a table with a weight."
+    },
+    "UnknownSni": {
+      "description": "Handling of a TLS handshake for a host name that no certificate of the listener covers.",
+      "oneOf": [
+        {
+          "const": "default",
+          "description": "Present the first certificate of the listener, as Nginx presents the certificate of its\ndefault server.",
+          "type": "string"
+        },
+        {
+          "const": "reject",
+          "description": "Fail the handshake, so that the certificates are not shown to clients that do not know a\nhost name they cover, such as scanners connecting by IP address.",
+          "type": "string"
+        }
+      ]
     },
     "Upstream": {
       "additionalProperties": false,

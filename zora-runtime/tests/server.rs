@@ -468,3 +468,41 @@ async fn engines_can_reject_changes() {
         ["prepare web", "commit web", "prepare api,web"]
     );
 }
+
+/// Applying the configuration in effect again prepares the engines again and leaves unchanged
+/// listeners alone. A change committed while it waits is what it applies, not the older one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reapplies_the_newest_configuration() {
+    let recorder = Recorder::default();
+    let server = Arc::new(start_recorded(WEB, &recorder).await);
+    let web = addr(&server, "web").await;
+    let snapshot = server.reapply().await.expect("reapply");
+    assert_eq!(snapshot.version, 2);
+    assert_eq!(addr(&server, "web").await, web);
+
+    let prepared = server
+        .prepare(parse(&format!("{WEB}{API}")))
+        .await
+        .expect("prepare");
+    let waiting = tokio::spawn({
+        let server = server.clone();
+        async move { server.reapply().await }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    prepared.commit();
+    let snapshot = waiting.await.expect("join").expect("reapply");
+    assert_eq!(snapshot.config.listeners.len(), 2);
+    assert_eq!(
+        recorder.lines(),
+        [
+            "prepare web",
+            "commit web",
+            "prepare web",
+            "commit web",
+            "prepare api,web",
+            "commit api,web",
+            "prepare api,web",
+            "commit api,web",
+        ]
+    );
+}

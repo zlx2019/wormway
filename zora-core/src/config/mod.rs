@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 pub use certificate::Certificate;
 pub use duration::{Duration, ParseDurationError};
 pub use error::{ConfigError, Issue, ParseError, Position};
-pub use listener::{HttpSettings, Listener, ListenerTls, Protocol};
+pub use listener::{HttpSettings, Listener, ListenerTls, Protocol, UnknownSni};
 pub use name::{InvalidName, Name};
 pub use route::{HostPattern, InvalidHostPattern, Route, RouteMatch};
 pub use settings::{

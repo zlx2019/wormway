@@ -1,57 +1,55 @@
 //! Integration tests of the gateway: a runtime server with the gateway in front of axum
 //! upstreams, driven by reqwest and by a raw HTTP/1.1 client that shows the connection handling.
 
+mod common;
+
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::Request;
-use axum::routing::get;
 use reqwest::StatusCode;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::runtime::Handle;
-use zora_core::config::Config;
-use zora_gateway::Gateway;
-use zora_runtime::{Server, Services};
+use tokio::net::TcpStream;
+use tokio::sync::{Notify, Semaphore};
+use zora_runtime::Server;
+
+use crate::common::{addr, parse, serve, upstream};
 
 /// A listener on any free loopback port.
 const WEB: &str = "[listeners.web]\nlisten = [\"127.0.0.1:0\"]\nprotocol = \"http\"\n";
 
-/// Starts an upstream that answers `<name> <host> <path>` to every request, and `<name>` to
-/// `/slow` after 300 ms.
-async fn upstream(name: &'static str) -> SocketAddr {
-    let app = axum::Router::new()
-        .route(
-            "/slow",
-            get(move || async move {
-                tokio::time::sleep(Duration::from_millis(300)).await;
-                name
-            }),
-        )
-        .fallback(move |request: Request| async move {
-            let host = request
-                .headers()
-                .get("host")
-                .and_then(|value| value.to_str().ok())
-                .unwrap_or("-");
-            format!("{name} {host} {}", request.uri().path())
-        });
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let addr = listener.local_addr().expect("local address");
-    tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
-    addr
+/// Holds the requests of an upstream until the test releases them.
+struct Gate {
+    /// Signals that a request reached the upstream.
+    arrived: Notify,
+    /// Lets the requests through once the test adds a permit.
+    release: Semaphore,
+}
+
+/// Starts an upstream that answers `held` to every request once its gate releases it.
+async fn held_upstream() -> (SocketAddr, Arc<Gate>) {
+    let gate = Arc::new(Gate {
+        arrived: Notify::new(),
+        release: Semaphore::new(0),
+    });
+    let held = gate.clone();
+    let app = axum::Router::new().fallback(move || {
+        let gate = held.clone();
+        async move {
+            gate.arrived.notify_one();
+            let _permit = gate.release.acquire().await;
+            "held"
+        }
+    });
+    (serve(app).await, gate)
 }
 
 /// A loopback address where nothing listens.
 fn dead_addr() -> SocketAddr {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     listener.local_addr().expect("local address")
-}
-
-/// Parses a configuration, adding `version = 1` in front.
-fn parse(text: &str) -> Config {
-    Config::from_toml(&format!("version = 1\n{text}")).expect("valid configuration")
 }
 
 /// A listener named `web` with the given keep-alive timeout, and one route to `addr`.
@@ -61,19 +59,9 @@ fn proxy_to(addr: SocketAddr, keepalive: &str) -> String {
     )
 }
 
-/// Starts a server with the gateway on the test runtime.
+/// Starts a server with the gateway on the test runtime, without certificates.
 async fn start(text: &str) -> Server {
-    let mut services = Services::new();
-    Gateway::new(2).register(&mut services);
-    match Server::start(Handle::current(), services, parse(text)).await {
-        Ok(server) => server,
-        Err(error) => panic!("cannot start: {error:?}"),
-    }
-}
-
-/// The first bound address of `listener`.
-async fn addr(server: &Server, listener: &str) -> SocketAddr {
-    server.listeners().await[listener][0]
+    common::start(text, Path::new(".")).await
 }
 
 /// Sends `GET path` with a `Host` header to `addr`, ignoring the proxy settings of the
@@ -308,20 +296,21 @@ async fn zero_keepalive_closes_after_each_response() {
 /// client to close the connection.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn asks_clients_to_close_while_draining() {
-    let a = upstream("a").await;
-    let server = start(&proxy_to(a, "75s")).await;
+    let (target, gate) = held_upstream().await;
+    let server = start(&proxy_to(target, "75s")).await;
     let mut raw = Raw::connect(addr(&server, "web").await).await;
-    raw.send("/slow").await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    raw.send("/").await;
+    gate.arrived.notified().await;
 
     // New HTTP settings give the listener a new service, and the old one drains.
     server
-        .apply(parse(&proxy_to(a, "30s")))
+        .apply(parse(&proxy_to(target, "30s")))
         .await
         .expect("apply");
+    gate.release.add_permits(1);
     let response = raw.response().await;
     assert_eq!(response.status, 200);
-    assert_eq!(response.body, "a");
+    assert_eq!(response.body, "held");
     assert_eq!(response.header("connection"), Some("close"));
     assert!(raw.closed_within(Duration::from_secs(1)).await);
 }

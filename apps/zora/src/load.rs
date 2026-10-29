@@ -15,12 +15,16 @@ pub fn load(path: &Path) -> anyhow::Result<Result<Config, ConfigError>> {
     Ok(Config::from_toml(&text).and_then(check_log_filter))
 }
 
+/// Returns the directory of the configuration file at `path`, which relative paths in the
+/// file are resolved against.
+pub fn config_dir(path: &Path) -> &Path {
+    path.parent().unwrap_or(Path::new(""))
+}
+
 /// Returns the data directory set in `config`, read from the file at `path`. A relative
 /// directory is relative to the file, not to the working directory.
 pub fn data_dir(path: &Path, config: &Config) -> PathBuf {
-    path.parent()
-        .unwrap_or(Path::new(""))
-        .join(&config.storage.data_dir)
+    config_dir(path).join(&config.storage.data_dir)
 }
 
 /// Checks `log.level`, which only the logging setup of the binary can parse.

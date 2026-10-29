@@ -31,7 +31,7 @@ struct Cli {
 /// Subcommands.
 #[derive(Subcommand)]
 enum Command {
-    /// Run until SIGINT or SIGTERM. SIGHUP reloads the configuration file.
+    /// Run until SIGINT or SIGTERM. SIGHUP reloads the configuration and certificate files.
     Run(ConfigArgs),
     /// Validate a configuration file and report every problem found.
     Check(ConfigArgs),

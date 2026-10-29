@@ -30,12 +30,16 @@ source = "file"             # db (default): dynamic settings live in the databas
 [listeners.web]
 listen = ["0.0.0.0:8080"]
 protocol = "http"
-http = { keepalive_timeout = "75s" }    # the default; "0s" turns keep-alive off
+http = { keepalive_timeout = "75s", h2c = false }   # defaults; "0s" turns keep-alive off,
+                                                    # h2c accepts HTTP/2 without TLS
 
 [listeners.websecure]
 listen = ["0.0.0.0:8443"]
 protocol = "http"
-tls = { certificates = ["example"] }
+# The host name the client sends picks the certificate; unknown_sni: "default" presents the
+# first certificate to other names, "reject" fails their handshake. HTTP/2 is agreed on during
+# the handshake.
+tls = { certificates = ["example"], unknown_sni = "default" }
 
 # Requests go to the most specific matching route: exact host, then wildcard host, then any
 # host; within those, the longest path prefix.
@@ -47,6 +51,8 @@ upstream = "app"
 [upstreams.app]
 targets = ["127.0.0.1:3000", { address = "127.0.0.1:3001", weight = 2 }]
 
+# Relative paths are relative to this file. The files are read again on every change and on
+# SIGHUP, so renewed certificates take effect without a restart.
 [certificates.example]
 cert = "certs/example.crt"
 key = "certs/example.key"
