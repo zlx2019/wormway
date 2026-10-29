@@ -50,10 +50,26 @@ listeners = ["web"]                      # default: every HTTP listener
 match = { hosts = ["app.example.com", "*.app.example.com"], paths = ["/"] }
 upstream = "app"
 
+# Requests sent upstream carry X-Forwarded-For, X-Forwarded-Proto, X-Forwarded-Host, X-Real-IP
+# and X-Request-Id, replacing what the client sent; request_headers run after them.
 [routes.app-api]
 priority = 0                             # default; higher wins over every other rule
 match = { hosts = ["app.example.com"], paths = ["/api/", { exact = "/health" }, { regex = "^/v[0-9]+/" }], methods = ["GET", "POST"], headers = { "X-Canary" = "1", "Authorization" = true } }
 upstream = "app"
+rewrite = { strip_prefix = "/api", add_prefix = "/v2" }      # /api/users goes upstream as /v2/users
+request_headers = { remove = ["X-Debug"], set = { "X-Env" = "prod" }, add = { "X-Via" = "zora" } }
+response_headers = { set = { "Strict-Transport-Security" = "max-age=63072000" } }
+compress = true                          # gzip, br or zstd, the first the client accepts
+
+# Instead of an upstream, a route can answer with a redirect, where {host} and {uri} come from
+# the request (status 301, 302, 303, 307 or 308, default 302), or with a fixed response.
+[routes.to-https]
+listeners = ["web"]
+redirect = { to = "https://{host}:8443{uri}", status = 301 }
+
+[routes.maintenance]
+match = { paths = ["/maintenance"] }
+respond = { status = 503, body = "down for maintenance" }
 
 [upstreams.app]
 targets = ["127.0.0.1:3000", { address = "127.0.0.1:3001", weight = 2 }]

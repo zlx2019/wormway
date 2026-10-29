@@ -9,6 +9,7 @@
 //! structure and stops at the first error, which carries a line and column. Validation checks
 //! the rules that span fields and reports every problem, each with the path of its setting.
 
+mod action;
 mod certificate;
 mod duration;
 mod error;
@@ -24,10 +25,13 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+pub use action::{Action, HeaderRules, Redirect, RedirectPart, Respond, Rewrite};
 pub use certificate::Certificate;
 pub use duration::{Duration, ParseDurationError};
 pub use error::{ConfigError, Issue, ParseError, Position};
-pub use http::{HeaderName, InvalidHeaderName, InvalidMethod, Method};
+pub use http::{
+    HeaderName, HeaderValue, InvalidHeaderName, InvalidHeaderValue, InvalidMethod, Method,
+};
 pub use listener::{HttpSettings, Listener, ListenerTls, Protocol, UnknownSni};
 pub use name::{InvalidName, Name};
 pub use route::{

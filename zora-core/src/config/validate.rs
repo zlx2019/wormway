@@ -3,8 +3,23 @@
 use std::collections::HashSet;
 use std::net::SocketAddr;
 
-use super::{Config, ConfigSource, Issue, PathPattern, Target};
+use super::{
+    Config, ConfigSource, HeaderName, HeaderRules, Issue, Name, PathPattern, Redirect, Route,
+    Target,
+};
 use crate::routing::normalize_path;
+
+/// Headers that frame a message or belong to one connection: routes may not change them.
+const MANAGED_HEADERS: [&str; 8] = [
+    "connection",
+    "content-length",
+    "keep-alive",
+    "proxy-connection",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+];
 
 /// Returns every rule violation in `config`.
 pub(super) fn errors(config: &Config) -> Vec<Issue> {
@@ -90,7 +105,8 @@ fn check_address_conflicts(config: &Config, issues: &mut Vec<Issue>) {
     }
 }
 
-/// Each route names existing listeners and an existing upstream, and its paths can match.
+/// Each route names existing listeners, can match, does exactly one thing, and changes only what
+/// it may.
 fn check_routes(config: &Config, issues: &mut Vec<Issue>) {
     for (name, route) in &config.routes {
         for (i, listener) in route.listeners.iter().enumerate() {
@@ -101,38 +117,155 @@ fn check_routes(config: &Config, issues: &mut Vec<Issue>) {
                 ));
             }
         }
-        for (i, path) in route.r#match.paths.iter().enumerate() {
-            if let Some(problem) = path_problem(path) {
+        for (i, pattern) in route.r#match.paths.iter().enumerate() {
+            let problem = match pattern {
+                PathPattern::Prefix(path) => path_problem(path, false),
+                PathPattern::Exact(path) => path_problem(path, true),
+                PathPattern::Regex(_) => None,
+            };
+            if let Some(problem) = problem {
                 issues.push(Issue::new(
                     format!("routes.{name}.match.paths[{i}]"),
                     problem,
                 ));
             }
         }
-        if !config.upstreams.contains_key(&route.upstream) {
+        check_action(config, name, route, issues);
+        check_modifiers(name, route, issues);
+    }
+}
+
+/// The route does exactly one thing, and that thing is sound.
+fn check_action(config: &Config, name: &Name, route: &Route, issues: &mut Vec<Issue>) {
+    let actions = [
+        route.upstream.is_some(),
+        route.redirect.is_some(),
+        route.respond.is_some(),
+    ];
+    match actions.into_iter().filter(|set| *set).count() {
+        0 => issues.push(Issue::new(
+            format!("routes.{name}"),
+            "set one of upstream, redirect and respond",
+        )),
+        1 => {}
+        _ => issues.push(Issue::new(
+            format!("routes.{name}"),
+            "set only one of upstream, redirect and respond",
+        )),
+    }
+    if let Some(upstream) = &route.upstream
+        && !config.upstreams.contains_key(upstream)
+    {
+        issues.push(Issue::new(
+            format!("routes.{name}.upstream"),
+            format!("unknown upstream \"{upstream}\""),
+        ));
+    }
+    if let Some(redirect) = &route.redirect {
+        if let Some(problem) = target_problem(redirect) {
+            issues.push(Issue::new(format!("routes.{name}.redirect.to"), problem));
+        }
+        if !Redirect::STATUSES.contains(&redirect.status()) {
             issues.push(Issue::new(
-                format!("routes.{name}.upstream"),
-                format!("unknown upstream \"{}\"", route.upstream),
+                format!("routes.{name}.redirect.status"),
+                "must be 301, 302, 303, 307 or 308",
+            ));
+        }
+    }
+    if let Some(respond) = &route.respond {
+        if !(200..=599).contains(&respond.status) {
+            issues.push(Issue::new(
+                format!("routes.{name}.respond.status"),
+                "must be between 200 and 599",
+            ));
+        } else if matches!(respond.status, 204 | 304) && !respond.body.is_empty() {
+            issues.push(Issue::new(
+                format!("routes.{name}.respond.body"),
+                "must be empty for status 204 and 304",
             ));
         }
     }
 }
 
-/// Returns why a path condition can never match, if it cannot: request paths start with "/" and
-/// are compared after normalization, so a prefix or an exact path must be in normal form.
-fn path_problem(pattern: &PathPattern) -> Option<String> {
-    let (path, exact) = match pattern {
-        PathPattern::Prefix(path) => (path, false),
-        PathPattern::Exact(path) => (path, true),
-        PathPattern::Regex(_) => return None,
+/// Returns what is wrong with the target of a redirect, if anything.
+fn target_problem(redirect: &Redirect) -> Option<String> {
+    if redirect.to.is_empty() || !redirect.to.bytes().all(|b| b.is_ascii_graphic()) {
+        return Some(
+            "must be a URL or a path, in visible ASCII characters without spaces".to_owned(),
+        );
+    }
+    redirect.parts().err()
+}
+
+/// The rewrite and the header rules of the route are sound, and the changes to upstream
+/// requests come with an upstream.
+fn check_modifiers(name: &Name, route: &Route, issues: &mut Vec<Issue>) {
+    let only_upstream = "only for routes with an upstream";
+    if let Some(rewrite) = &route.rewrite {
+        let at = format!("routes.{name}.rewrite");
+        if route.upstream.is_none() {
+            issues.push(Issue::new(&at, only_upstream));
+        }
+        if rewrite.strip_prefix.is_none() && rewrite.add_prefix.is_none() {
+            issues.push(Issue::new(&at, "set strip_prefix, add_prefix or both"));
+        }
+        // The prefix to strip is compared with the normalized path, as a path condition is.
+        if let Some(prefix) = &rewrite.strip_prefix
+            && let Some(problem) = path_problem(prefix, false)
+        {
+            issues.push(Issue::new(format!("{at}.strip_prefix"), problem));
+        }
+        if let Some(prefix) = &rewrite.add_prefix
+            && !prefix.starts_with('/')
+        {
+            issues.push(Issue::new(
+                format!("{at}.add_prefix"),
+                "must start with \"/\"",
+            ));
+        }
+    }
+    let request_headers = format!("routes.{name}.request_headers");
+    if route.upstream.is_none() && !route.request_headers.is_empty() {
+        issues.push(Issue::new(&request_headers, only_upstream));
+    }
+    check_header_rules(&request_headers, &route.request_headers, issues);
+    check_header_rules(
+        &format!("routes.{name}.response_headers"),
+        &route.response_headers,
+        issues,
+    );
+}
+
+/// The rules leave alone the headers that frame the message or belong to the connection.
+fn check_header_rules(at: &str, rules: &HeaderRules, issues: &mut Vec<Issue>) {
+    let managed = |name: &HeaderName| {
+        MANAGED_HEADERS
+            .iter()
+            .any(|managed| name.as_str().eq_ignore_ascii_case(managed))
     };
+    let problem = "cannot be changed: it frames the message or belongs to the connection";
+    for (i, name) in rules.remove.iter().enumerate() {
+        if managed(name) {
+            issues.push(Issue::new(format!("{at}.remove[{i}]"), problem));
+        }
+    }
+    for (field, values) in [("set", &rules.set), ("add", &rules.add)] {
+        for name in values.keys().filter(|name| managed(name)) {
+            issues.push(Issue::new(format!("{at}.{field}.{name}"), problem));
+        }
+    }
+}
+
+/// Returns why a prefix, or an exact path if `exact`, can never match, if it cannot: request
+/// paths start with "/" and are compared after normalization, so they must be in normal form.
+fn path_problem(path: &str, exact: bool) -> Option<String> {
     if !path.starts_with('/') {
         return Some("must start with \"/\"".to_owned());
     }
     // A prefix may end in the middle of a segment, such as "/." for "/.well-known/": a letter
     // after it keeps that part from reading as a "." or ".." segment.
     let written = if exact {
-        path.clone()
+        path.to_owned()
     } else {
         format!("{path}x")
     };
@@ -351,6 +484,103 @@ mod tests {
             issues[3]
         );
         assert_eq!(issues[4].message, "must start with \"/\"");
+    }
+
+    /// A route does exactly one thing, and redirects and fixed responses need sound settings.
+    #[test]
+    fn checks_route_actions() {
+        let config = parse(
+            r#"
+            version = 1
+            [routes.both]
+            upstream = "app"
+            respond = { status = 200 }
+            [routes.early]
+            respond = { status = 101 }
+            [routes.empty]
+            respond = { status = 204, body = "x" }
+            [routes.fine]
+            redirect = { to = "https://{host}:8443{uri}", status = 308 }
+            [routes.lost]
+            upstream = "missing"
+            [routes.moved]
+            redirect = { to = "https://{hots}{uri}", status = 300 }
+            [routes.none]
+            [routes.spaced]
+            redirect = { to = "/a b" }
+            [upstreams.app]
+            targets = ["127.0.0.1:9000"]
+            "#,
+        );
+        let issues = errors(&config);
+        assert_eq!(
+            paths(&issues),
+            [
+                "routes.both",
+                "routes.early.respond.status",
+                "routes.empty.respond.body",
+                "routes.lost.upstream",
+                "routes.moved.redirect.to",
+                "routes.moved.redirect.status",
+                "routes.none",
+                "routes.spaced.redirect.to",
+            ]
+        );
+        assert_eq!(
+            issues[0].message,
+            "set only one of upstream, redirect and respond"
+        );
+        assert_eq!(
+            issues[4].message,
+            "has an unknown placeholder {hots}, expected {host} or {uri}"
+        );
+        assert_eq!(
+            issues[6].message,
+            "set one of upstream, redirect and respond"
+        );
+    }
+
+    /// Rewrites and request headers need an upstream, and header rules leave alone the headers
+    /// that frame the message or belong to the connection.
+    #[test]
+    fn checks_route_modifiers() {
+        let config = parse(
+            r#"
+            version = 1
+            [routes.api]
+            upstream = "app"
+            rewrite = { strip_prefix = "/v1//", add_prefix = "api" }
+            request_headers = { remove = ["X-Debug", "Connection"], set = { "Content-Length" = "1", "X-Env" = "prod" } }
+            response_headers = { add = { "Transfer-Encoding" = "chunked", "X-Ok" = "1" } }
+            [routes.moved]
+            redirect = { to = "/" }
+            rewrite = {}
+            request_headers = { set = { "X-Env" = "prod" } }
+            response_headers = { set = { "Cache-Control" = "no-store" } }
+            [upstreams.app]
+            targets = ["127.0.0.1:9000"]
+            "#,
+        );
+        let issues = errors(&config);
+        assert_eq!(
+            paths(&issues),
+            [
+                "routes.api.rewrite.strip_prefix",
+                "routes.api.rewrite.add_prefix",
+                "routes.api.request_headers.remove[1]",
+                "routes.api.request_headers.set.Content-Length",
+                "routes.api.response_headers.add.Transfer-Encoding",
+                "routes.moved.rewrite",
+                "routes.moved.rewrite",
+                "routes.moved.request_headers",
+            ]
+        );
+        assert_eq!(
+            issues[2].message,
+            "cannot be changed: it frames the message or belongs to the connection"
+        );
+        assert_eq!(issues[5].message, "only for routes with an upstream");
+        assert_eq!(issues[6].message, "set strip_prefix, add_prefix or both");
     }
 
     /// h2c is for listeners without TLS only.

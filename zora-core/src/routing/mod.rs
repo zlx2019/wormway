@@ -13,7 +13,7 @@ use std::borrow::Cow;
 use std::cmp::Reverse;
 use std::collections::HashMap;
 
-pub use path::normalize_path;
+pub use path::{encode_path, normalize_path, rewrite_path};
 use table::{HostKind, PathKind, PathTable, PathTableBuilder, Rank};
 
 use crate::config::{HeaderCondition, Route};

@@ -74,6 +74,59 @@ impl fmt::Display for HeaderName {
 #[error("invalid header name {0:?}, expected letters, digits and characters such as - or _")]
 pub struct InvalidHeaderName(pub String);
 
+/// The value of an HTTP header: visible ASCII characters, spaces and tabs.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct HeaderValue(String);
+
+impl HeaderValue {
+    /// Returns the value.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for HeaderValue {
+    type Error = InvalidHeaderValue;
+
+    /// Accepts visible ASCII characters, spaces and tabs.
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        if is_header_value(&value) {
+            Ok(Self(value))
+        } else {
+            Err(InvalidHeaderValue(value))
+        }
+    }
+}
+
+impl FromStr for HeaderValue {
+    type Err = InvalidHeaderValue;
+
+    /// Parses a header value, see [`HeaderValue`].
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::try_from(s.to_owned())
+    }
+}
+
+impl From<HeaderValue> for String {
+    /// Returns the value.
+    fn from(value: HeaderValue) -> Self {
+        value.0
+    }
+}
+
+impl fmt::Display for HeaderValue {
+    /// Writes the value.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Error for a string that is not a valid [`HeaderValue`].
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("invalid header value {0:?}, expected visible ASCII characters, spaces and tabs")]
+pub struct InvalidHeaderValue(pub String);
+
 /// An HTTP request method, such as `GET`. Methods are case-sensitive and the standard ones are
 /// in uppercase, so methods are kept in uppercase.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -156,6 +209,27 @@ impl schemars::JsonSchema for HeaderName {
 }
 
 #[cfg(feature = "schema")]
+impl schemars::JsonSchema for HeaderValue {
+    /// Inlined: a named definition would add nothing to a plain string pattern.
+    fn inline_schema() -> bool {
+        true
+    }
+
+    /// Name of the schema.
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "HeaderValue".into()
+    }
+
+    /// Visible ASCII characters, spaces and tabs; keep in sync with `is_header_value`.
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "pattern": "^[\\t -~]*$"
+        })
+    }
+}
+
+#[cfg(feature = "schema")]
 impl schemars::JsonSchema for Method {
     /// Inlined: a named definition would add nothing to a plain string pattern.
     fn inline_schema() -> bool {
@@ -207,5 +281,10 @@ mod tests {
         assert!(is_header_value(""));
         assert!(!is_header_value("a\r\nb"));
         assert!(!is_header_value("é"));
+        assert_eq!("a b".parse::<HeaderValue>().unwrap().as_str(), "a b");
+        assert_eq!(
+            "a\nb".parse::<HeaderValue>(),
+            Err(InvalidHeaderValue("a\nb".to_owned()))
+        );
     }
 }

@@ -9,9 +9,10 @@ use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::http::is_header_value;
-use super::{HeaderName, Method, Name};
+use super::{Action, HeaderName, HeaderRules, Method, Name, Redirect, Respond, Rewrite};
 
-/// A rule of the HTTP listeners: the requests it matches go to its upstream.
+/// A rule of the HTTP listeners: the requests it matches go to its upstream, or get a redirect
+/// or a fixed response. Exactly one of `upstream`, `redirect` and `respond` is set.
 ///
 /// When several routes match a request, they are compared in this order, and the first
 /// difference decides:
@@ -23,7 +24,7 @@ use super::{HeaderName, Method, Name};
 /// 4. a route with methods before one without;
 /// 5. the route with more header conditions;
 /// 6. the route name in alphabetical order.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Route {
@@ -37,7 +38,51 @@ pub struct Route {
     #[serde(default, skip_serializing_if = "RouteMatch::is_any")]
     pub r#match: RouteMatch,
     /// Upstream that serves the requests.
-    pub upstream: Name,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream: Option<Name>,
+    /// A redirect to answer the requests with, such as
+    /// `{ to = "https://{host}{uri}", status = 301 }`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redirect: Option<Redirect>,
+    /// A fixed response to answer the requests with, such as
+    /// `{ status = 503, body = "down for maintenance" }`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub respond: Option<Respond>,
+    /// Changes to the path of the requests sent to the upstream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rewrite: Option<Rewrite>,
+    /// Changes to the headers of the requests sent to the upstream. They come after the
+    /// `X-Forwarded-*`, `X-Real-IP` and `X-Request-Id` headers that zora sets, so they can change
+    /// or remove those too.
+    #[serde(default, skip_serializing_if = "HeaderRules::is_empty")]
+    pub request_headers: HeaderRules,
+    /// Changes to the headers of the responses, whether they come from the upstream or from the
+    /// route.
+    #[serde(default, skip_serializing_if = "HeaderRules::is_empty")]
+    pub response_headers: HeaderRules,
+    /// Compress responses with gzip, Brotli or zstd, the first that the client accepts, when
+    /// their type is text-like. Streams of server-sent events and gRPC are left alone. Default:
+    /// `false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compress: Option<bool>,
+}
+
+impl Route {
+    /// Returns what the route does, or `None` unless exactly one of `upstream`, `redirect` and
+    /// `respond` is set, which validation rules out.
+    pub fn action(&self) -> Option<Action<'_>> {
+        match (&self.upstream, &self.redirect, &self.respond) {
+            (Some(upstream), None, None) => Some(Action::Upstream(upstream)),
+            (None, Some(redirect), None) => Some(Action::Redirect(redirect)),
+            (None, None, Some(respond)) => Some(Action::Respond(respond)),
+            _ => None,
+        }
+    }
+
+    /// Whether responses are compressed.
+    pub fn compress(&self) -> bool {
+        self.compress.unwrap_or(false)
+    }
 }
 
 /// Whether a priority is the default one, which is not written out.
@@ -577,5 +622,52 @@ mod tests {
         ] {
             assert!(conditions(text).is_err(), "{text}");
         }
+    }
+
+    /// Actions and modifiers are read, written back in the same form, and the action is the
+    /// one field of upstream, redirect and respond that is set.
+    #[test]
+    fn reads_and_writes_actions_and_modifiers() {
+        let route: Route = toml::from_str(
+            r#"
+            upstream = "api"
+            rewrite = { strip_prefix = "/v1", add_prefix = "/api" }
+            request_headers = { remove = ["X-Debug"], set = { "X-Env" = "prod" }, add = { "X-Tag" = "a" } }
+            response_headers = { set = { "Strict-Transport-Security" = "max-age=63072000" } }
+            compress = true
+            "#,
+        )
+        .unwrap();
+        let api: Name = "api".parse().unwrap();
+        assert_eq!(route.action(), Some(Action::Upstream(&api)));
+        assert!(route.compress());
+        let json = serde_json::to_string(&route).unwrap();
+        assert_eq!(
+            json,
+            r#"{"upstream":"api","rewrite":{"strip_prefix":"/v1","add_prefix":"/api"},"request_headers":{"remove":["X-Debug"],"set":{"X-Env":"prod"},"add":{"X-Tag":"a"}},"response_headers":{"set":{"Strict-Transport-Security":"max-age=63072000"}},"compress":true}"#
+        );
+        assert_eq!(serde_json::from_str::<Route>(&json).unwrap(), route);
+        let toml = toml::to_string(&route).unwrap();
+        assert_eq!(toml::from_str::<Route>(&toml).unwrap(), route);
+
+        let redirect: Route = toml::from_str(r#"redirect = { to = "/new" }"#).unwrap();
+        assert_eq!(
+            redirect.action(),
+            Some(Action::Redirect(&Redirect {
+                to: "/new".to_owned(),
+                status: None,
+            }))
+        );
+        assert!(!redirect.compress());
+        let both: Route = toml::from_str("upstream = \"api\"\nrespond = { status = 200 }").unwrap();
+        assert_eq!(both.action(), None);
+        assert_eq!(Route::default().action(), None);
+
+        let bad_value = r#"response_headers = { set = { "X-A" = "a\nb" } }"#;
+        let error = toml::from_str::<Route>(bad_value).unwrap_err();
+        assert!(
+            error.message().starts_with("invalid header value"),
+            "{error}"
+        );
     }
 }

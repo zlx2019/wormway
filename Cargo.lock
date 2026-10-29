@@ -4280,6 +4280,7 @@ dependencies = [
  "async-trait",
  "axum",
  "h2",
+ "http",
  "pingora",
  "rcgen",
  "reqwest",

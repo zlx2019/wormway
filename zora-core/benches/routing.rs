@@ -4,7 +4,6 @@
 //! Every set of routes also holds a route for any request and three regular expressions for any
 //! host, as most configurations have. Run with `cargo bench -p zora-core`.
 
-use std::collections::BTreeMap;
 use std::hint::black_box;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
@@ -32,18 +31,16 @@ impl RequestHeaders for NoHeaders {
 /// A route for `hosts`, or any host if empty, and `paths`, or any path if empty.
 fn route(hosts: &[String], paths: Vec<PathPattern>) -> Route {
     Route {
-        listeners: Vec::new(),
-        priority: 0,
         r#match: RouteMatch {
             hosts: hosts
                 .iter()
                 .map(|host| host.parse().expect("valid host"))
                 .collect(),
             paths,
-            methods: Vec::new(),
-            headers: BTreeMap::new(),
+            ..RouteMatch::default()
         },
-        upstream: "app".parse().expect("valid name"),
+        upstream: Some("app".parse().expect("valid name")),
+        ..Route::default()
     }
 }
 

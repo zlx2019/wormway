@@ -21,11 +21,13 @@ ignore = [
     # unsafe-libyaml is unmaintained; it reads Pingora's YAML configuration, which zora never loads.
     { id = "RUSTSEC-2024-0449", reason = "pulled in by Pingora, zora reads no YAML" },
     # Flaws of zstd 0.13, fixed in zstd 0.14 and zstd-safe 8, which Pingora 0.9.0 does not accept.
-    # Pingora compresses with zstd only in its HTTP cache, which zora does not enable. Enabling the
-    # cache requires a Pingora release with the fixed zstd first.
-    { id = "RUSTSEC-2026-0391", reason = "zstd in Pingora's HTTP cache, which zora does not enable" },
-    { id = "RUSTSEC-2026-0398", reason = "zstd in Pingora's HTTP cache, which zora does not enable" },
-    { id = "RUSTSEC-2026-0403", reason = "zstd in Pingora's HTTP cache, which zora does not enable" },
+    # zora reaches zstd only when routes with compress = true answer clients that ask for zstd:
+    # Pingora then compresses with a new encoder for each response. The flaws lie in reused
+    # contexts, seekable archives and streaming decompression, which that never touches. Pingora's
+    # HTTP cache uses zstd too; enabling it requires a Pingora release with the fixed zstd first.
+    { id = "RUSTSEC-2026-0391", reason = "zora's compression makes a new zstd context for each response" },
+    { id = "RUSTSEC-2026-0398", reason = "seekable zstd archives, which zora does not read" },
+    { id = "RUSTSEC-2026-0403", reason = "zstd decompression, which zora does not do" },
 ]
 
 [licenses]

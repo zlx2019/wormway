@@ -21,7 +21,7 @@ use tokio_rustls::client::TlsStream;
 use zora_core::config::ConfigError;
 use zora_runtime::ApplyError;
 
-use crate::common::{addr, parse, start, upstream};
+use crate::common::{addr, parse, serve, start, upstream};
 
 /// A test certificate authority and the directory of the certificate files.
 struct Pki {
@@ -237,6 +237,30 @@ fn config(tls: &str, certificates: &[&str], target: SocketAddr) -> String {
         text += &format!("[certificates.{name}]\ncert = \"{name}.crt\"\nkey = \"{name}.key\"\n");
     }
     text
+}
+
+/// Upstreams learn from `X-Forwarded-Proto` that the client came over TLS.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tells_upstreams_about_tls() {
+    let pki = Pki::new();
+    pki.issue("a", &["a.test"]);
+    let proto = serve(
+        axum::Router::new().fallback(|headers: axum::http::HeaderMap| async move {
+            let proto = headers.get("x-forwarded-proto");
+            proto
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("-")
+                .to_owned()
+        }),
+    )
+    .await;
+    let text = config(r#"{ certificates = ["a"] }"#, &["a"], proto);
+    let server = start(&text, pki.dir.path()).await;
+    let secure = addr(&server, "secure").await;
+    let stream = connect(&pki.client(&[b"http/1.1"]), secure, Some("a.test"))
+        .await
+        .expect("handshake");
+    assert_eq!(get_http1(stream, "/").await, (200, "https".to_owned()));
 }
 
 /// An exact name, one label under a wildcard, and the first certificate for unknown names and

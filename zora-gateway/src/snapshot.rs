@@ -9,6 +9,7 @@ use zora_core::config::{Config, Issue, Name, Protocol, Upstream};
 use zora_core::routing::{Request, Router};
 use zora_runtime::{BoxFuture, Engine, Staged};
 
+use crate::route::CompiledRoute;
 use crate::upstream::UpstreamRuntime;
 
 /// Most targets of one upstream: Pingora's load balancer indexes them with 16 bits.
@@ -22,12 +23,6 @@ pub(crate) struct GatewaySnapshot {
     routers: HashMap<Name, Router<Arc<CompiledRoute>>>,
     /// Upstreams by name. The next compilation reuses the ones whose settings stay the same.
     upstreams: BTreeMap<Name, Arc<UpstreamRuntime>>,
-}
-
-/// A route ready to serve requests.
-pub(crate) struct CompiledRoute {
-    /// Upstream that serves the requests.
-    pub(crate) upstream: Arc<UpstreamRuntime>,
 }
 
 impl GatewaySnapshot {
@@ -56,15 +51,16 @@ impl GatewaySnapshot {
             return Err(issues);
         }
 
-        // Validation made sure that every route names an existing upstream.
-        let routes: Vec<_> = config
-            .routes
-            .values()
-            .filter_map(|route| {
-                let upstream = upstreams.get(&route.upstream)?.clone();
-                Some((route, Arc::new(CompiledRoute { upstream })))
-            })
-            .collect();
+        let mut routes = Vec::new();
+        for (name, route) in &config.routes {
+            match CompiledRoute::new(name, route, &upstreams) {
+                Ok(compiled) => routes.push((route, Arc::new(compiled))),
+                Err(issue) => issues.push(issue),
+            }
+        }
+        if !issues.is_empty() {
+            return Err(issues);
+        }
         let routers = config
             .listeners
             .iter()
@@ -247,6 +243,9 @@ mod tests {
             &second.upstreams["other"]
         ));
         let found = route(&second, "web", None).unwrap();
-        assert!(Arc::ptr_eq(&found.upstream, &second.upstreams["app"]));
+        assert!(Arc::ptr_eq(
+            found.upstream().unwrap(),
+            &second.upstreams["app"]
+        ));
     }
 }

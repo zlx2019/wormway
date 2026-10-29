@@ -1,6 +1,13 @@
-//! Path normalization: the form in which routes compare request paths.
+//! Request paths: the normal form in which routes compare them, and the rewrites of the paths
+//! sent to upstreams.
 
 use std::borrow::Cow;
+
+use crate::config::Rewrite;
+
+/// Bytes that a URL path holds as they are: besides letters and digits, the separators and the
+/// characters that RFC 3986 allows in a path segment.
+const PATH_BYTES: &[u8] = b"/-._~!$&'()*+,;=:@";
 
 /// Returns `path` in the form that routes compare: every `%XX` decoded, `%2F` included, then
 /// `.` and `..` segments resolved and repeated slashes merged, as Nginx does. A `..` above the
@@ -88,6 +95,56 @@ fn resolve(path: &[u8]) -> Vec<u8> {
     resolved
 }
 
+/// Returns the path that `rewrite` makes of `path`, a normalized path: `strip_prefix` removed
+/// if `path` starts with it, then `add_prefix` put in front, with one slash between the two. A
+/// path stripped to nothing becomes `/`, or `add_prefix` as written. A path that does not start
+/// with `/`, such as `*`, stays as it is.
+pub fn rewrite_path(path: &[u8], rewrite: &Rewrite) -> Vec<u8> {
+    if !path.starts_with(b"/") {
+        return path.to_vec();
+    }
+    let rest = rewrite
+        .strip_prefix
+        .as_deref()
+        .and_then(|prefix| path.strip_prefix(prefix.as_bytes()))
+        .unwrap_or(path);
+    let prefix = rewrite.add_prefix.as_deref().unwrap_or_default().as_bytes();
+    if rest.is_empty() {
+        return if prefix.is_empty() {
+            b"/".to_vec()
+        } else {
+            prefix.to_vec()
+        };
+    }
+    let prefix = &prefix[..prefix
+        .iter()
+        .rposition(|&b| b != b'/')
+        .map_or(0, |last| last + 1)];
+    let rest = &rest[rest.iter().position(|&b| b != b'/').unwrap_or(rest.len())..];
+    let mut rewritten = Vec::with_capacity(prefix.len() + 1 + rest.len());
+    rewritten.extend_from_slice(prefix);
+    rewritten.push(b'/');
+    rewritten.extend_from_slice(rest);
+    rewritten
+}
+
+/// Percent-encodes the bytes of `path` that a URL path cannot hold as they are, `%` included, so
+/// that the result names exactly the bytes of `path`. Decoded slashes stay slashes.
+pub fn encode_path(path: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = String::with_capacity(path.len());
+    for &byte in path {
+        if byte.is_ascii_alphanumeric() || PATH_BYTES.contains(&byte) {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+            encoded.push(char::from(HEX[usize::from(byte & 0xF)]));
+        }
+    }
+    encoded
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,5 +212,50 @@ mod tests {
         ] {
             assert_eq!(*normal(path), *expected, "{path:?}");
         }
+    }
+
+    /// The rewrite of `path` with `strip` and `add`, as text.
+    fn rewritten(path: &str, strip: Option<&str>, add: Option<&str>) -> String {
+        let rewrite = Rewrite {
+            strip_prefix: strip.map(str::to_owned),
+            add_prefix: add.map(str::to_owned),
+        };
+        String::from_utf8(rewrite_path(path.as_bytes(), &rewrite)).unwrap()
+    }
+
+    /// Prefixes are stripped and added with one slash between, and trailing slashes stay.
+    #[test]
+    fn rewrites_paths() {
+        for (path, strip, add, expected) in [
+            ("/v1/users", Some("/v1"), None, "/users"),
+            ("/v1/users", Some("/v1/"), None, "/users"),
+            ("/v1/users", Some("/v1"), Some("/api"), "/api/users"),
+            ("/v1/users", Some("/v1/"), Some("/api/"), "/api/users"),
+            ("/v1/users/", Some("/v1"), Some("/api"), "/api/users/"),
+            ("/v1", Some("/v1"), None, "/"),
+            ("/v1", Some("/v1"), Some("/api"), "/api"),
+            ("/v1/", Some("/v1"), Some("/api"), "/api/"),
+            ("/v2/users", Some("/v1"), Some("/api"), "/api/v2/users"),
+            ("/users", None, Some("/api"), "/api/users"),
+            ("/", None, Some("/api"), "/api/"),
+            ("/users", None, Some("/"), "/users"),
+            ("*", Some("/v1"), Some("/api"), "*"),
+        ] {
+            assert_eq!(
+                rewritten(path, strip, add),
+                expected,
+                "{path} {strip:?} {add:?}"
+            );
+        }
+    }
+
+    /// Bytes outside the path syntax are encoded, and decoding gives the same bytes back.
+    #[test]
+    fn encodes_paths() {
+        let path = "/a b/été/?#%/~!$&'()*+,;=:@-._".as_bytes();
+        let encoded = encode_path(path);
+        assert_eq!(encoded, "/a%20b/%C3%A9t%C3%A9/%3F%23%25/~!$&'()*+,;=:@-._");
+        assert_eq!(*normalize_path(encoded.as_bytes()), *path);
+        assert_eq!(encode_path(b"/\xff\x00"), "/%FF%00");
     }
 }

@@ -8,8 +8,11 @@
 //! ends. Listeners with TLS present the certificates of [`Certificates`] and agree on HTTP/2 or
 //! HTTP/1.1 during the handshake. Pingora types do not appear in the public API.
 
+mod compress;
+mod headers;
 mod listener;
 mod proxy;
+mod route;
 mod snapshot;
 mod upstream;
 

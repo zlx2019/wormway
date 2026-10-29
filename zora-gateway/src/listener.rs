@@ -14,6 +14,7 @@ use pingora::protocols::l4::stream::Stream as L4Stream;
 use pingora::protocols::{GetSocketDigest, SocketDigest, Stream};
 use pingora::proxy::{HttpProxy, http_proxy};
 use pingora::server::configuration::ServerConf;
+use tokio::io::AsyncReadExt;
 use tracing::debug;
 use zora_core::config::{Listener, Name};
 use zora_runtime::{BoxError, BoxFuture, Connection, Service, ServiceFactory, Shutdown};
@@ -26,6 +27,12 @@ use crate::snapshot::GatewaySnapshot;
 const ALPN: [&[u8]; 2] = [b"h2", b"http/1.1"];
 /// How long a client may take to complete the TLS handshake.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Length of the bytes that HTTP/2 without TLS starts with, which Pingora reads to tell it from
+/// HTTP/1.1 on listeners with h2c.
+const PREFACE_LEN: usize = 24;
+/// How long a client of a listener with h2c may take to send those bytes: as long as Pingora
+/// allows for the headers of an HTTP/1.1 request. Pingora itself waits for them without a limit.
+const PREFACE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Builds the service of each HTTP listener.
 pub(crate) struct HttpListeners {
@@ -64,7 +71,12 @@ impl ServiceFactory for HttpListeners {
             None => None,
         };
         let keepalive = KeepAlive::new(listener.http.keepalive_timeout().get());
-        let app = Proxy::new(name.clone(), self.snapshot.clone(), keepalive.http1);
+        let app = Proxy::new(
+            name.clone(),
+            self.snapshot.clone(),
+            keepalive.http1,
+            listener.tls.is_some(),
+        );
         // Pingora loads the system root certificates for its upstream connector here, and
         // panics when that fails, for example when SSL_CERT_FILE names a missing file.
         let mut proxy = panic::catch_unwind(AssertUnwindSafe(|| http_proxy(&self.conf, app)))
@@ -82,6 +94,7 @@ impl ServiceFactory for HttpListeners {
         proxy.server_options = Some(options);
         Ok(Arc::new(HttpService {
             proxy: Arc::new(proxy),
+            h2c: tls.is_none() && listener.http.h2c(),
             tls,
         }))
     }
@@ -125,16 +138,26 @@ struct HttpService {
     proxy: Arc<HttpProxy<Proxy>>,
     /// The TLS handshake of a listener with TLS.
     tls: Option<Acceptor>,
+    /// Whether the listener accepts HTTP/2 without TLS.
+    h2c: bool,
 }
 
 impl Service for HttpService {
-    /// Completes the TLS handshake if the listener has TLS, then serves HTTP/1.1, with
-    /// keep-alive, or HTTP/2 until the connection ends.
+    /// Completes the TLS handshake if the listener has TLS, or waits for the start of the
+    /// request if it accepts HTTP/2 without TLS, then serves HTTP/1.1, with keep-alive, or HTTP/2
+    /// until the connection ends.
     fn serve(self: Arc<Self>, conn: Connection, shutdown: Shutdown) -> BoxFuture<'static> {
         Box::pin(async move {
             let peer = conn.peer;
             let stream = l4_stream(conn);
             let stream: Stream = match &self.tls {
+                None if self.h2c => match read_preface(stream, PREFACE_TIMEOUT).await {
+                    Some(stream) => Box::new(stream),
+                    None => {
+                        debug!(%peer, "no request started in time");
+                        return;
+                    }
+                },
                 None => Box::new(stream),
                 Some(acceptor) => {
                     let handshake = acceptor.tls_handshake(stream);
@@ -164,6 +187,20 @@ impl Service for HttpService {
     }
 }
 
+/// Reads the first bytes of a connection, from which Pingora tells HTTP/2 from HTTP/1.1, within
+/// `limit`, and puts them back for Pingora to read. Returns `None` if the client sends fewer in
+/// time or closes the connection first.
+async fn read_preface(mut stream: L4Stream, limit: Duration) -> Option<L4Stream> {
+    let mut preface = [0; PREFACE_LEN];
+    match tokio::time::timeout(limit, stream.read_exact(&mut preface)).await {
+        Ok(Ok(_)) => {
+            stream.rewind(&preface);
+            Some(stream)
+        }
+        Ok(Err(_)) | Err(_) => None,
+    }
+}
+
 /// Turns an accepted connection into a Pingora stream that knows the address of its client.
 fn l4_stream(conn: Connection) -> L4Stream {
     let mut stream = L4Stream::from(conn.stream);
@@ -177,6 +214,33 @@ fn l4_stream(conn: Connection) -> L4Stream {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The first bytes come back for Pingora to read, and a client that sends too few in time
+    /// is let go.
+    #[tokio::test]
+    async fn waits_for_the_preface_within_a_limit() {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::{TcpListener, TcpStream};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let request = b"GET /a/long/enough/path HTTP/1.1\r\n";
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client.write_all(request).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        let mut stream = read_preface(L4Stream::from(server), Duration::from_secs(5))
+            .await
+            .expect("enough bytes");
+        let mut read = vec![0; request.len()];
+        stream.read_exact(&mut read).await.unwrap();
+        assert_eq!(read, request);
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client.write_all(b"GET / HTTP/1.0\r\n\r\n").await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        let short = read_preface(L4Stream::from(server), Duration::from_millis(100)).await;
+        assert!(short.is_none());
+    }
 
     /// Timeouts round up to whole seconds; zero turns HTTP/1.1 keep-alive off and leaves
     /// HTTP/2 one second.

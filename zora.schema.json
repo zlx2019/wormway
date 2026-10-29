@@ -69,6 +69,43 @@
         }
       ]
     },
+    "HeaderRules": {
+      "additionalProperties": false,
+      "description": "Changes to the headers of a message, made in this order: `remove`, `set`, `add`.",
+      "properties": {
+        "add": {
+          "additionalProperties": false,
+          "description": "Values to add after the ones the headers have.",
+          "patternProperties": {
+            "^[A-Za-z0-9!#$%&'*+.^_`|~-]+$": {
+              "pattern": "^[\\t -~]*$",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "remove": {
+          "description": "Headers to remove.",
+          "items": {
+            "pattern": "^[A-Za-z0-9!#$%&'*+.^_`|~-]+$",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "set": {
+          "additionalProperties": false,
+          "description": "Headers to set, replacing the values they have.",
+          "patternProperties": {
+            "^[A-Za-z0-9!#$%&'*+.^_`|~-]+$": {
+              "pattern": "^[\\t -~]*$",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
     "HttpSettings": {
       "additionalProperties": false,
       "description": "HTTP settings of a listener. Settings left out follow the defaults of the running zora.",
@@ -245,10 +282,83 @@
         }
       ]
     },
+    "Redirect": {
+      "additionalProperties": false,
+      "description": "An answer that sends the client elsewhere.",
+      "properties": {
+        "status": {
+          "description": "Status code: 301 or 308 for a permanent move, 302, 303 or 307 for a temporary one; 307\nand 308 keep the method and the body. Default: 302.",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "to": {
+          "description": "Where to: a URL or a path. `{host}` stands for the host name of the request, without the\nport, and `{uri}` for its path and query as sent, as in `\"https://{host}{uri}\"`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "to"
+      ],
+      "type": "object"
+    },
+    "Respond": {
+      "additionalProperties": false,
+      "description": "A fixed answer.",
+      "properties": {
+        "body": {
+          "description": "Body, empty by default. A body is sent as `text/plain; charset=utf-8` unless\n`response_headers` set another `Content-Type`.",
+          "type": "string"
+        },
+        "status": {
+          "description": "Status code, from 200 to 599.",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "type": "object"
+    },
+    "Rewrite": {
+      "additionalProperties": false,
+      "description": "Changes to the path of the requests sent to the upstream. They apply to the normalized path,\nwhich is then encoded again; the query stays as it is.",
+      "properties": {
+        "add_prefix": {
+          "description": "Added in front of the path, after `strip_prefix`, such as `/api`: `/users` becomes\n`/api/users`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "strip_prefix": {
+          "description": "Removed from the start of the path when the path starts with it, such as `/v1`: `/v1/users`\nbecomes `/users`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "Route": {
       "additionalProperties": false,
-      "description": "A rule of the HTTP listeners: the requests it matches go to its upstream.\n\nWhen several routes match a request, they are compared in this order, and the first\ndifference decides:\n\n1. the higher `priority`;\n2. an exact host, then a wildcard host, then any host;\n3. an exact path, then a regular expression, then a path prefix, longer prefixes first, then\n   any path;\n4. a route with methods before one without;\n5. the route with more header conditions;\n6. the route name in alphabetical order.",
+      "description": "A rule of the HTTP listeners: the requests it matches go to its upstream, or get a redirect\nor a fixed response. Exactly one of `upstream`, `redirect` and `respond` is set.\n\nWhen several routes match a request, they are compared in this order, and the first\ndifference decides:\n\n1. the higher `priority`;\n2. an exact host, then a wildcard host, then any host;\n3. an exact path, then a regular expression, then a path prefix, longer prefixes first, then\n   any path;\n4. a route with methods before one without;\n5. the route with more header conditions;\n6. the route name in alphabetical order.",
       "properties": {
+        "compress": {
+          "description": "Compress responses with gzip, Brotli or zstd, the first that the client accepts, when\ntheir type is text-like. Streams of server-sent events and gRPC are left alone. Default:\n`false`.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "listeners": {
           "description": "HTTP listeners whose requests the route sees. Without it, every HTTP listener.",
           "items": {
@@ -270,15 +380,64 @@
           "format": "int32",
           "type": "integer"
         },
+        "redirect": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Redirect"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "A redirect to answer the requests with, such as\n`{ to = \"https://{host}{uri}\", status = 301 }`."
+        },
+        "request_headers": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/HeaderRules"
+            }
+          ],
+          "description": "Changes to the headers of the requests sent to the upstream. They come after the\n`X-Forwarded-*`, `X-Real-IP` and `X-Request-Id` headers that zora sets, so they can change\nor remove those too."
+        },
+        "respond": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Respond"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "A fixed response to answer the requests with, such as\n`{ status = 503, body = \"down for maintenance\" }`."
+        },
+        "response_headers": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/HeaderRules"
+            }
+          ],
+          "description": "Changes to the headers of the responses, whether they come from the upstream or from the\nroute."
+        },
+        "rewrite": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Rewrite"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Changes to the path of the requests sent to the upstream."
+        },
         "upstream": {
           "description": "Upstream that serves the requests.",
           "pattern": "^[a-z0-9_-]{1,64}$",
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
-      "required": [
-        "upstream"
-      ],
       "type": "object"
     },
     "RouteMatch": {
