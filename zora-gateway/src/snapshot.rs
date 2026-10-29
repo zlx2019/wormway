@@ -10,7 +10,7 @@ use zora_core::routing::{Request, Router};
 use zora_runtime::{BoxFuture, Engine, Staged};
 
 use crate::route::CompiledRoute;
-use crate::upstream::UpstreamRuntime;
+use crate::upstream::{CompiledUpstream, UpstreamRuntime};
 
 /// Most targets of one upstream: Pingora's load balancer indexes them with 16 bits.
 const MAX_TARGETS: usize = u16::MAX as usize;
@@ -21,8 +21,9 @@ const MAX_TARGETS: usize = u16::MAX as usize;
 pub(crate) struct GatewaySnapshot {
     /// The router of each HTTP listener.
     routers: HashMap<Name, Router<Arc<CompiledRoute>>>,
-    /// Upstreams by name. The next compilation reuses the ones whose settings stay the same.
-    upstreams: BTreeMap<Name, Arc<UpstreamRuntime>>,
+    /// Upstreams by name. The next compilation reuses the runtimes whose targets and balancing
+    /// stay the same.
+    upstreams: BTreeMap<Name, Arc<CompiledUpstream>>,
 }
 
 impl GatewaySnapshot {
@@ -42,9 +43,10 @@ impl GatewaySnapshot {
         for (name, settings) in &config.upstreams {
             match self.upstream(name, settings).await {
                 Ok(runtime) => {
-                    upstreams.insert(name.clone(), runtime);
+                    let compiled = CompiledUpstream::new(runtime, settings);
+                    upstreams.insert(name.clone(), Arc::new(compiled));
                 }
-                Err(issue) => issues.push(issue),
+                Err(problems) => issues.extend(problems),
             }
         }
         if !issues.is_empty() {
@@ -76,29 +78,33 @@ impl GatewaySnapshot {
         Ok(Self { routers, upstreams })
     }
 
-    /// Returns the runtime of upstream `name`: the running one if its settings are the same,
-    /// otherwise a new one.
+    /// Returns the runtime of upstream `name`: the running one if its targets and balancing are
+    /// the same, otherwise a new one, with its host names resolved.
     async fn upstream(
         &self,
         name: &Name,
         settings: &Upstream,
-    ) -> Result<Arc<UpstreamRuntime>, Issue> {
+    ) -> Result<Arc<UpstreamRuntime>, Vec<Issue>> {
         if let Some(running) = self.upstreams.get(name)
-            && running.settings() == settings
+            && running.runtime.serves(settings)
         {
-            return Ok(running.clone());
+            return Ok(running.runtime.clone());
         }
         let path = format!("upstreams.{name}.targets");
         if settings.targets.len() > MAX_TARGETS {
-            return Err(Issue::new(
+            return Err(vec![Issue::new(
                 path,
                 format!("at most {MAX_TARGETS} targets are supported"),
-            ));
+            )]);
         }
-        match UpstreamRuntime::new(settings).await {
-            Ok(runtime) => Ok(Arc::new(runtime)),
-            Err(error) => Err(Issue::new(path, error.to_string())),
-        }
+        UpstreamRuntime::new(name, settings)
+            .await
+            .map_err(|problems| {
+                problems
+                    .into_iter()
+                    .map(|(index, problem)| Issue::new(format!("{path}[{index}]"), problem))
+                    .collect()
+            })
     }
 }
 
@@ -225,27 +231,52 @@ mod tests {
         assert!(route(&snapshot, "api", None).is_some());
     }
 
-    /// Upstreams whose settings stay the same are reused; changed ones are rebuilt.
+    /// Upstreams whose targets and balancing stay the same keep their runtime, whatever else
+    /// changes; changed ones get a new runtime.
     #[tokio::test]
     async fn reuses_unchanged_upstreams() {
         let first = GatewaySnapshot::default()
             .compile(&parse(BASE))
             .await
             .unwrap();
-        let changed = BASE.replace("127.0.0.1:9002", "127.0.0.1:9003");
+        let changed = BASE.replace("127.0.0.1:9002", "127.0.0.1:9003").replace(
+            "targets = [\"127.0.0.1:9001\"]",
+            "targets = [\"127.0.0.1:9001\"]\nretries = 0",
+        );
         let second = first.compile(&parse(&changed)).await.unwrap();
         assert!(Arc::ptr_eq(
-            &first.upstreams["app"],
-            &second.upstreams["app"]
+            &first.upstreams["app"].runtime,
+            &second.upstreams["app"].runtime
         ));
+        assert_eq!(second.upstreams["app"].retries(), 0);
         assert!(!Arc::ptr_eq(
-            &first.upstreams["other"],
-            &second.upstreams["other"]
+            &first.upstreams["other"].runtime,
+            &second.upstreams["other"].runtime
+        ));
+        let balanced = changed.replace("retries = 0", "balance = \"least_conn\"");
+        let third = second.compile(&parse(&balanced)).await.unwrap();
+        assert!(!Arc::ptr_eq(
+            &second.upstreams["app"].runtime,
+            &third.upstreams["app"].runtime
         ));
         let found = route(&second, "web", None).unwrap();
         assert!(Arc::ptr_eq(
             found.upstream().unwrap(),
             &second.upstreams["app"]
         ));
+    }
+
+    /// A host name that does not resolve rejects the configuration, at its target.
+    #[tokio::test]
+    async fn rejects_names_that_do_not_resolve() {
+        let unknown = BASE.replace("127.0.0.1:9002", "unknown.invalid:9002");
+        let issues = GatewaySnapshot::default()
+            .compile(&parse(&unknown))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].path, "upstreams.other.targets[0]");
+        assert!(issues[0].message.contains("unknown.invalid"), "{issues:?}");
     }
 }

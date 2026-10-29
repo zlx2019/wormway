@@ -3,9 +3,10 @@
 use std::collections::HashSet;
 use std::net::SocketAddr;
 
+use super::http::is_token;
 use super::{
-    Config, ConfigSource, HeaderName, HeaderRules, Issue, Name, PathPattern, Redirect, Route,
-    Target,
+    Balance, Config, ConfigSource, Duration, HashKey, HeaderName, HeaderRules, Issue, Name,
+    PathPattern, Redirect, Route, Target, Upstream,
 };
 use crate::routing::normalize_path;
 
@@ -234,6 +235,34 @@ fn check_modifiers(name: &Name, route: &Route, issues: &mut Vec<Issue>) {
         &route.response_headers,
         issues,
     );
+    let timeouts = format!("routes.{name}.timeouts");
+    if route.upstream.is_none() && !route.timeouts.is_default() {
+        issues.push(Issue::new(&timeouts, only_upstream));
+    }
+    check_timeouts(
+        &timeouts,
+        [
+            ("read", route.timeouts.read),
+            ("write", route.timeouts.write),
+        ],
+        issues,
+    );
+}
+
+/// Each time limit that is set is longer than zero.
+fn check_timeouts<const N: usize>(
+    at: &str,
+    timeouts: [(&str, Option<Duration>); N],
+    issues: &mut Vec<Issue>,
+) {
+    for (field, timeout) in timeouts {
+        if timeout.is_some_and(|timeout| timeout.get().is_zero()) {
+            issues.push(Issue::new(
+                format!("{at}.{field}"),
+                "must be longer than 0s",
+            ));
+        }
+    }
 }
 
 /// The rules leave alone the headers that frame the message or belong to the connection.
@@ -285,7 +314,8 @@ fn path_problem(path: &str, exact: bool) -> Option<String> {
     ))
 }
 
-/// Each upstream has targets, each listed once and with a weight in range.
+/// Each upstream has targets, each listed once and with a weight in range, and sound balancing,
+/// time limits and retries.
 fn check_upstreams(config: &Config, issues: &mut Vec<Issue>) {
     for (name, upstream) in &config.upstreams {
         if upstream.targets.is_empty() {
@@ -296,7 +326,7 @@ fn check_upstreams(config: &Config, issues: &mut Vec<Issue>) {
         }
         let mut seen = HashSet::new();
         for (i, target) in upstream.targets.iter().enumerate() {
-            if !seen.insert(target.address) {
+            if !seen.insert(&target.address) {
                 issues.push(Issue::new(
                     format!("upstreams.{name}.targets[{i}]"),
                     format!("{} is listed twice", target.address),
@@ -309,6 +339,43 @@ fn check_upstreams(config: &Config, issues: &mut Vec<Issue>) {
                 ));
             }
         }
+        check_balancing(name, upstream, issues);
+        let timeouts = &upstream.timeouts;
+        check_timeouts(
+            &format!("upstreams.{name}.timeouts"),
+            [
+                ("connect", timeouts.connect),
+                ("read", timeouts.read),
+                ("write", timeouts.write),
+                ("idle", timeouts.idle),
+            ],
+            issues,
+        );
+        if upstream.retries() > Upstream::MAX_RETRIES {
+            issues.push(Issue::new(
+                format!("upstreams.{name}.retries"),
+                format!("must be at most {}", Upstream::MAX_RETRIES),
+            ));
+        }
+    }
+}
+
+/// The hash key comes with `consistent_hash`, and a cookie key names a cookie.
+fn check_balancing(name: &Name, upstream: &Upstream, issues: &mut Vec<Issue>) {
+    let Some(key) = &upstream.hash_key else {
+        return;
+    };
+    let at = format!("upstreams.{name}.hash_key");
+    if upstream.balance() != Balance::ConsistentHash {
+        issues.push(Issue::new(&at, "only for balance = \"consistent_hash\""));
+    }
+    if let HashKey::Cookie(cookie) = key
+        && !is_token(cookie)
+    {
+        issues.push(Issue::new(
+            format!("{at}.cookie"),
+            "must be a cookie name: letters, digits and !#$%&'*+-.^_`|~",
+        ));
     }
 }
 
@@ -581,6 +648,49 @@ mod tests {
         );
         assert_eq!(issues[5].message, "only for routes with an upstream");
         assert_eq!(issues[6].message, "set strip_prefix, add_prefix or both");
+    }
+
+    /// The hash key needs consistent hashing, time limits are longer than zero, retries are
+    /// bounded, and only routes with an upstream have time limits.
+    #[test]
+    fn checks_upstream_settings() {
+        let config = parse(
+            r#"
+            version = 1
+            [routes.api]
+            upstream = "app"
+            timeouts = { read = "0s", write = "5m" }
+            [routes.down]
+            respond = { status = 503 }
+            timeouts = { read = "5m" }
+            [upstreams.app]
+            targets = ["10.0.0.1:80", "api.internal:80", "API.internal:80"]
+            hash_key = { cookie = "a b" }
+            timeouts = { connect = "0ms", idle = "1s" }
+            retries = 11
+            [upstreams.sticky]
+            targets = ["10.0.0.1:80"]
+            balance = "consistent_hash"
+            hash_key = { header = "X-User" }
+            "#,
+        );
+        let issues = errors(&config);
+        assert_eq!(
+            paths(&issues),
+            [
+                "routes.api.timeouts.read",
+                "routes.down.timeouts",
+                "upstreams.app.targets[2]",
+                "upstreams.app.hash_key",
+                "upstreams.app.hash_key.cookie",
+                "upstreams.app.timeouts.connect",
+                "upstreams.app.retries",
+            ]
+        );
+        assert_eq!(issues[0].message, "must be longer than 0s");
+        assert_eq!(issues[2].message, "api.internal:80 is listed twice");
+        assert_eq!(issues[3].message, "only for balance = \"consistent_hash\"");
+        assert_eq!(issues[6].message, "must be at most 10");
     }
 
     /// h2c is for listeners without TLS only.

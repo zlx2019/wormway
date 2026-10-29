@@ -29,3 +29,5 @@ extend-ignore-re = [
 flate = "flate"
 # wrk and wrk2 load generators
 wrk = "wrk"
+# Pingora's Error::esource, the source of an error
+esource = "esource"

@@ -19,6 +19,31 @@
       },
       "type": "object"
     },
+    "Balance": {
+      "description": "How requests are spread over the targets of an upstream. Every way follows the weights.",
+      "oneOf": [
+        {
+          "const": "round_robin",
+          "description": "Each request goes to the next target in turn.",
+          "type": "string"
+        },
+        {
+          "const": "random",
+          "description": "Each request goes to a target picked at random.",
+          "type": "string"
+        },
+        {
+          "const": "least_conn",
+          "description": "Each request goes to the target with the fewest requests in progress, relative to its\nweight.",
+          "type": "string"
+        },
+        {
+          "const": "consistent_hash",
+          "description": "Requests with the same key, see `hash_key`, go to the same target, and adding or\nremoving a target moves few keys.",
+          "type": "string"
+        }
+      ]
+    },
     "Certificate": {
       "additionalProperties": false,
       "description": "A certificate chain and its private key, read from PEM files. Relative paths are resolved\nagainst the directory of the configuration file. The files are read again whenever the\nconfiguration is applied, so that replaced files take effect on reload.",
@@ -66,6 +91,48 @@
           "const": "file",
           "description": "The configuration file. Edit it and send SIGHUP to reload; the dashboard is read-only.",
           "type": "string"
+        }
+      ]
+    },
+    "HashKey": {
+      "description": "What `consistent_hash` hashes: `\"client_ip\"`, `\"uri\"`, `{ header = \"X-User\" }` or\n`{ cookie = \"session\" }`.",
+      "oneOf": [
+        {
+          "const": "client_ip",
+          "description": "The IP address of the client.",
+          "type": "string"
+        },
+        {
+          "const": "uri",
+          "description": "The path and the query of the request, as sent.",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The value of a request header.",
+          "properties": {
+            "header": {
+              "pattern": "^[A-Za-z0-9!#$%&'*+.^_`|~-]+$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "header"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The value of a cookie.",
+          "properties": {
+            "cookie": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "cookie"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -429,6 +496,14 @@
           ],
           "description": "Changes to the path of the requests sent to the upstream."
         },
+        "timeouts": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/RouteTimeouts"
+            }
+          ],
+          "description": "Time limits of the requests to the upstream, in place of those of the upstream, such as\n`{ read = \"5m\" }` for slow reports."
+        },
         "upstream": {
           "description": "Upstream that serves the requests.",
           "pattern": "^[a-z0-9_-]{1,64}$",
@@ -484,6 +559,29 @@
             "$ref": "#/definitions/PathPattern"
           },
           "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "RouteTimeouts": {
+      "additionalProperties": false,
+      "description": "Time limits of a route, in place of those of its upstream.",
+      "properties": {
+        "read": {
+          "description": "Longest wait for the next data from the upstream. Default: `read` of the upstream.",
+          "pattern": "^([0-9]+(ms|s|m|h|d))+$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "write": {
+          "description": "Longest wait for the upstream to take the next data of a request. Default: `write` of\nthe upstream.",
+          "pattern": "^([0-9]+(ms|s|m|h|d))+$",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "type": "object"
@@ -546,7 +644,46 @@
           "type": "object"
         }
       ],
-      "description": "A server of an upstream: its address, such as \"10.0.0.1:8080\", or a table with a weight."
+      "description": "A server of an upstream: its address, such as \"10.0.0.1:8080\" or \"api.internal:8080\", or a table with a weight. Host names are resolved when the configuration is applied and every 30 seconds after."
+    },
+    "Timeouts": {
+      "additionalProperties": false,
+      "description": "Time limits of the connections and requests to the targets of an upstream. A request that\nruns out of time is answered with 504.",
+      "properties": {
+        "connect": {
+          "description": "Time to connect to a target, TLS handshake included. Default: `\"10s\"`.",
+          "pattern": "^([0-9]+(ms|s|m|h|d))+$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "idle": {
+          "description": "How long an idle connection to a target is kept for the next request. Default: `\"60s\"`.",
+          "pattern": "^([0-9]+(ms|s|m|h|d))+$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "read": {
+          "description": "Longest wait for the next data from a target, such as the response header. Default:\n`\"60s\"`.",
+          "pattern": "^([0-9]+(ms|s|m|h|d))+$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "write": {
+          "description": "Longest wait for a target to take the next data of a request. Default: `\"60s\"`.",
+          "pattern": "^([0-9]+(ms|s|m|h|d))+$",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
     },
     "UnknownSni": {
       "description": "Handling of a TLS handshake for a host name that no certificate of the listener covers.",
@@ -567,12 +704,51 @@
       "additionalProperties": false,
       "description": "A group of servers that requests are balanced over.",
       "properties": {
+        "balance": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Balance"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How requests are spread over the targets. Default: `\"round_robin\"`."
+        },
+        "hash_key": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/HashKey"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What `consistent_hash` hashes. A request without it, such as one without the header,\nhashes its client IP address instead. Default: `\"client_ip\"`."
+        },
+        "retries": {
+          "description": "How many other targets a request tries when it cannot connect, from 0 to\n[`Upstream::MAX_RETRIES`]. A request that reached a target is not sent to another one.\nDefault: 1.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "targets": {
-          "description": "The servers. Each request goes to the next one in turn, and a server with weight 2 gets\ntwice the share of one with weight 1.",
+          "description": "The servers. A server with weight 2 gets twice the share of one with weight 1.",
           "items": {
             "$ref": "#/definitions/Target"
           },
           "type": "array"
+        },
+        "timeouts": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Timeouts"
+            }
+          ],
+          "description": "Time limits of the connections and requests to the targets."
         }
       },
       "required": [

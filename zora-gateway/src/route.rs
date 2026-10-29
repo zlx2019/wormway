@@ -4,10 +4,12 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use zora_core::config::{Action, Issue, Name, Redirect, RedirectPart, Respond, Rewrite, Route};
+use zora_core::config::{
+    Action, Issue, Name, Redirect, RedirectPart, Respond, Rewrite, Route, RouteTimeouts,
+};
 
 use crate::headers::HeaderEdits;
-use crate::upstream::UpstreamRuntime;
+use crate::upstream::CompiledUpstream;
 
 /// A route ready to serve requests.
 pub(crate) struct CompiledRoute {
@@ -21,12 +23,14 @@ pub(crate) struct CompiledRoute {
     pub(crate) response_headers: HeaderEdits,
     /// Whether responses are compressed.
     pub(crate) compress: bool,
+    /// Time limits of the requests to the upstream, in place of those of the upstream.
+    pub(crate) timeouts: RouteTimeouts,
 }
 
 /// What a route does with a request.
 pub(crate) enum Handler {
     /// Forward it to this upstream.
-    Upstream(Arc<UpstreamRuntime>),
+    Upstream(Arc<CompiledUpstream>),
     /// Answer with a redirect.
     Redirect(RedirectTarget),
     /// Answer with a fixed response.
@@ -39,7 +43,7 @@ impl CompiledRoute {
     pub(crate) fn new(
         name: &Name,
         route: &Route,
-        upstreams: &BTreeMap<Name, Arc<UpstreamRuntime>>,
+        upstreams: &BTreeMap<Name, Arc<CompiledUpstream>>,
     ) -> Result<Self, Issue> {
         let at = |field: &str| format!("routes.{name}{field}");
         let handler = match route.action() {
@@ -70,11 +74,12 @@ impl CompiledRoute {
             request_headers,
             response_headers,
             compress: route.compress(),
+            timeouts: route.timeouts,
         })
     }
 
     /// Returns the upstream of a route that forwards requests.
-    pub(crate) fn upstream(&self) -> Option<&Arc<UpstreamRuntime>> {
+    pub(crate) fn upstream(&self) -> Option<&Arc<CompiledUpstream>> {
         match &self.handler {
             Handler::Upstream(upstream) => Some(upstream),
             Handler::Redirect(_) | Handler::Respond(_) => None,

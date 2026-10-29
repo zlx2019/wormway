@@ -1,22 +1,25 @@
 //! The Pingora application of an HTTP listener: finds the route of each request, then forwards
 //! the request to the upstream of the route or answers it, with the changes the route asks for.
 
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
-use http::HeaderValue;
+use http::{HeaderValue, Version};
 use pingora::http::{HMap, Method, RequestHeader, ResponseHeader};
-use pingora::proxy::{ProxyHttp, Session};
+use pingora::lb::Backend;
+use pingora::proxy::{FailToProxy, ProxyHttp, Session};
 use pingora::upstreams::peer::HttpPeer;
-use pingora::{Error, ErrorType, HTTPStatus};
-use zora_core::config::{Name, Rewrite};
+use pingora::{Error, ErrorSource, ErrorType, HTTPStatus};
+use zora_core::config::{HashKey, Name, Rewrite};
 use zora_core::routing::{self, Request, RequestHeaders};
 
 use crate::compress;
 use crate::headers::{self, HeaderEdits, RequestId};
 use crate::route::{CompiledRoute, FixedResponse, Handler, RedirectTarget};
 use crate::snapshot::GatewaySnapshot;
+use crate::upstream::{CompiledUpstream, Inflight};
 
 /// Serves the requests of one listener.
 pub(crate) struct Proxy {
@@ -39,6 +42,14 @@ pub(crate) struct RequestContext {
     route: Option<Arc<CompiledRoute>>,
     /// ID of the request, sent to the upstream as `X-Request-Id`.
     request_id: RequestId,
+    /// Targets the request went to, the current one last.
+    tried: Vec<Backend>,
+    /// Target of the next attempt, picked when an attempt failed.
+    next: Option<Backend>,
+    /// Attempts made at other targets after a connection failed.
+    retries: u32,
+    /// The request counted at its target, for upstreams balanced by requests in progress.
+    inflight: Option<Inflight>,
 }
 
 impl Proxy {
@@ -84,6 +95,10 @@ impl ProxyHttp for Proxy {
             snapshot: self.snapshot.load_full(),
             route: None,
             request_id: RequestId::new(),
+            tried: Vec::new(),
+            next: None,
+            retries: 0,
+            inflight: None,
         }
     }
 
@@ -126,21 +141,110 @@ impl ProxyHttp for Proxy {
         Ok(true)
     }
 
-    /// Picks the target of the request from the upstream of its route.
+    /// Picks the target of the request from the upstream of its route, unless a failed attempt
+    /// picked the next one already.
     async fn upstream_peer(
         &self,
-        _session: &mut Session,
+        session: &mut Session,
         ctx: &mut RequestContext,
     ) -> pingora::Result<Box<HttpPeer>> {
-        let upstream = ctx
+        let route = ctx
             .route
-            .as_ref()
-            .and_then(|route| route.upstream())
+            .clone()
+            .ok_or_else(|| Error::explain(ErrorType::InternalError, "request without route"))?;
+        let upstream = route
+            .upstream()
             .ok_or_else(|| Error::explain(ErrorType::InternalError, "request without upstream"))?;
-        let target = upstream
-            .select()
-            .ok_or_else(|| Error::explain(HTTPStatus(503), "no target available"))?;
-        Ok(Box::new(HttpPeer::new(target, false, String::new())))
+        let target = match ctx.next.take() {
+            Some(target) => target,
+            None => upstream
+                .runtime
+                .select(&selection_key(session, upstream), |_| true)
+                .ok_or_else(|| Error::explain(HTTPStatus(503), "no target available"))?,
+        };
+        ctx.inflight = upstream.runtime.track(&target);
+        let peer = upstream.peer(&target, &route.timeouts);
+        ctx.tried.push(target);
+        Ok(Box::new(peer))
+    }
+
+    /// Tries another target when connecting failed, as many times as the upstream allows and
+    /// as long as there is a target the request has not tried. Nothing was sent, so this is
+    /// safe for every method.
+    fn fail_to_connect(
+        &self,
+        session: &mut Session,
+        _peer: &HttpPeer,
+        ctx: &mut RequestContext,
+        mut e: Box<Error>,
+    ) -> Box<Error> {
+        let Some(route) = ctx.route.clone() else {
+            return e;
+        };
+        let Some(upstream) = route.upstream() else {
+            return e;
+        };
+        if ctx.retries >= upstream.retries() {
+            return e;
+        }
+        let tried = &ctx.tried;
+        let next = upstream
+            .runtime
+            .select(&selection_key(session, upstream), |target| {
+                !tried.iter().any(|seen| seen.addr == target.addr)
+            });
+        if let Some(next) = next {
+            ctx.retries += 1;
+            ctx.next = Some(next);
+            e.set_retry(true);
+        }
+        e
+    }
+
+    /// Retries over a new connection to the same target only when a reused connection turned
+    /// out closed, as Pingora does: for idempotent requests whose body can be sent again, and
+    /// never once the response has started.
+    fn error_while_proxy(
+        &self,
+        peer: &HttpPeer,
+        session: &mut Session,
+        e: Box<Error>,
+        ctx: &mut RequestContext,
+        client_reused: bool,
+    ) -> Box<Error> {
+        let mut e = e.more_context(format!("Peer: {peer}"));
+        if session.response_written().is_some()
+            || !session.req_header().method.is_idempotent()
+            || session.as_ref().retry_buffer_truncated()
+        {
+            e.set_retry(false);
+        } else {
+            e.retry.decide_reuse(client_reused);
+        }
+        if e.retry() {
+            ctx.next = ctx.tried.last().cloned();
+        }
+        e
+    }
+
+    /// Answers a request that could not be proxied: 504 when the upstream ran out of time, 502
+    /// for its other failures, as Nginx does.
+    async fn fail_to_proxy(
+        &self,
+        session: &mut Session,
+        e: &Error,
+        _ctx: &mut RequestContext,
+    ) -> FailToProxy {
+        let code = error_status(e);
+        if code > 0
+            && let Err(error) = session.respond_error(code).await
+        {
+            tracing::debug!("cannot send the error response: {error}");
+        }
+        FailToProxy {
+            error_code: code,
+            can_reuse_downstream: false,
+        }
     }
 
     /// Tells the upstream about the client, then rewrites the path and changes the headers as
@@ -175,6 +279,11 @@ impl ProxyHttp for Proxy {
     ) -> pingora::Result<()> {
         if session.is_process_shutting_down() {
             session.set_keepalive(None);
+        }
+        // An HTTP/1.0 upstream does not turn the response into HTTP/1.0, which would make HTTP/1.1
+        // clients give up keep-alive; Pingora frames the body for HTTP/1.1 already.
+        if response.version < Version::HTTP_11 {
+            response.set_version(Version::HTTP_11);
         }
         let Some(route) = &ctx.route else {
             return Ok(());
@@ -249,6 +358,71 @@ fn rewrite_target(request: &mut RequestHeader, rewrite: &Rewrite) -> pingora::Re
         target.extend_from_slice(&raw[query..]);
     }
     request.set_raw_path(&target)
+}
+
+/// Returns the status of the answer to a request that failed with `e`, or 0 when the client is
+/// gone: Pingora's choice, except 504 for upstream timeouts.
+fn error_status(e: &Error) -> u16 {
+    match (e.etype(), e.esource()) {
+        (HTTPStatus(code), _) => *code,
+        (
+            ErrorType::ConnectTimedout | ErrorType::ReadTimedout | ErrorType::WriteTimedout,
+            ErrorSource::Upstream,
+        ) => 504,
+        (_, ErrorSource::Upstream) => 502,
+        (
+            ErrorType::WriteError | ErrorType::ReadError | ErrorType::ConnectionClosed,
+            ErrorSource::Downstream,
+        ) => 0,
+        (_, ErrorSource::Downstream) => 400,
+        (_, ErrorSource::Internal | ErrorSource::Unset) => 500,
+    }
+}
+
+/// Returns what consistent hashing hashes for a request to `upstream`: its key, or the client
+/// IP address when the request does not have the key. Empty for other ways of balancing.
+fn selection_key(session: &Session, upstream: &CompiledUpstream) -> Vec<u8> {
+    let Some(key) = upstream.hash_key() else {
+        return Vec::new();
+    };
+    let request = session.req_header();
+    let found = match key {
+        HashKey::ClientIp => None,
+        HashKey::Uri => Some(request_target(request)),
+        HashKey::Header(name) => request
+            .headers
+            .get(name.as_str())
+            .map(|value| value.as_bytes()),
+        HashKey::Cookie(name) => cookie(&request.headers, name),
+    };
+    match found {
+        Some(key) => key.to_vec(),
+        None => client_ip(session).map_or_else(Vec::new, |ip| match ip {
+            IpAddr::V4(ip) => ip.octets().to_vec(),
+            IpAddr::V6(ip) => ip.octets().to_vec(),
+        }),
+    }
+}
+
+/// Returns the IP address of the client, IPv4 addresses mapped to IPv6 as IPv4.
+fn client_ip(session: &Session) -> Option<IpAddr> {
+    session
+        .client_addr()
+        .and_then(|addr| addr.as_inet())
+        .map(|addr| addr.ip().to_canonical())
+}
+
+/// Returns the value of cookie `name` in `headers`, as sent.
+fn cookie<'a>(headers: &'a HMap, name: &str) -> Option<&'a [u8]> {
+    headers
+        .get_all("cookie")
+        .iter()
+        .flat_map(|value| value.as_bytes().split(|&b| b == b';'))
+        .find_map(|pair| {
+            let pair = pair.trim_ascii();
+            let (key, value) = pair.split_at(pair.iter().position(|&b| b == b'=')?);
+            (key == name.as_bytes()).then_some(&value[1..])
+        })
 }
 
 /// Returns the host name of a request: from the request target in absolute form or the

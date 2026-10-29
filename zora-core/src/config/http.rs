@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 /// Whether `text` is an HTTP token, the syntax of header names and methods: one or more letters,
 /// digits and ``!#$%&'*+-.^_`|~``.
-fn is_token(text: &str) -> bool {
+pub(crate) fn is_token(text: &str) -> bool {
     !text.is_empty()
         && text
             .bytes()

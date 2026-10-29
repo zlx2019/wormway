@@ -42,7 +42,10 @@ pub use settings::{
     AdminSettings, ConfigSettings, ConfigSource, LogFormat, LogSettings, ServerSettings,
     StorageSettings,
 };
-pub use upstream::{Target, Upstream};
+pub use upstream::{
+    Balance, HashKey, InvalidTargetAddress, RouteTimeouts, Target, TargetAddress, Timeouts,
+    Upstream,
+};
 
 /// The configuration file, `zora.toml`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

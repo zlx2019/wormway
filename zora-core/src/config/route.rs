@@ -9,7 +9,9 @@ use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::http::is_header_value;
-use super::{Action, HeaderName, HeaderRules, Method, Name, Redirect, Respond, Rewrite};
+use super::{
+    Action, HeaderName, HeaderRules, Method, Name, Redirect, Respond, Rewrite, RouteTimeouts,
+};
 
 /// A rule of the HTTP listeners: the requests it matches go to its upstream, or get a redirect
 /// or a fixed response. Exactly one of `upstream`, `redirect` and `respond` is set.
@@ -65,6 +67,10 @@ pub struct Route {
     /// `false`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compress: Option<bool>,
+    /// Time limits of the requests to the upstream, in place of those of the upstream, such as
+    /// `{ read = "5m" }` for slow reports.
+    #[serde(default, skip_serializing_if = "RouteTimeouts::is_default")]
+    pub timeouts: RouteTimeouts,
 }
 
 impl Route {
