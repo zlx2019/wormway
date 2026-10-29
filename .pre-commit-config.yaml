@@ -1,4 +1,4 @@
-# pre-commit hooks for zora.
+# pre-commit hooks for Wormway.
 #   Install (once):       pre-commit install
 #   Run all fast checks:  pre-commit run --all-files
 #   Run the slow checks:  pre-commit run --all-files --hook-stage pre-push

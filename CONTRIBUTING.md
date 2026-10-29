@@ -1,6 +1,6 @@
-# Contributing to zora
+# Contributing to Wormway
 
-Thanks for your interest! zora is pre-release and maintained by a single person, so please read this page before you start.
+Thanks for your interest! Wormway is pre-release and maintained by a single person, so please read this page before you start.
 
 ## Before you start
 
@@ -69,7 +69,7 @@ Do not open public issues for vulnerabilities. See [SECURITY.md](SECURITY.md).
 
 ## 中文说明
 
-zora 处于发布前阶段，由一人维护。
+Wormway 处于发布前阶段，由一人维护。
 
 - 动手前先开 issue 或 discussion 对齐范围。范围刻意收窄：首版不做代理客户端、HTTP/3、Kubernetes 控制器、WAF、AI 网关和 Wasm 插件。
 - 响应时间是尽力而为，不在当前里程碑内的 PR 可能被暂缓或拒绝。

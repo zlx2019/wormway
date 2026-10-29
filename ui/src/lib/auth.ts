@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from "react"
 
 /** Key of the Admin API token in localStorage. */
-const TOKEN_KEY = "zora.token"
+const TOKEN_KEY = "wormway.token"
 
 /** Callbacks to run when the token changes in this tab. */
 const listeners = new Set<() => void>()

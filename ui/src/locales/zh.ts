@@ -22,16 +22,16 @@ export const zh: Messages = {
     cli: "命令行",
   },
   login: {
-    title: "登录 zora",
+    title: "登录 Wormway",
     description:
-      "输入 Admin API 的 token。它保存在 zora 数据目录下的 admin.token 里；设置了 ZORA_ADMIN_TOKEN 时以它为准。",
+      "输入 Admin API 的 token。它保存在 Wormway 数据目录下的 admin.token 里；设置了 WORMWAY_ADMIN_TOKEN 时以它为准。",
     token: "Token",
     submit: "登录",
     wrongToken: "token 不正确。",
   },
   overview: {
     title: "概览",
-    version: "zora 版本",
+    version: "Wormway 版本",
     uptime: "运行时长",
     config: "配置",
     configVersion: "{{source}}，版本 {{version}}",
@@ -49,7 +49,8 @@ export const zh: Messages = {
     description: "当前生效的动态配置。",
     version: "版本 {{version}}",
     noVersion: "没有保存的版本",
-    fileMode: "这些配置来自配置文件。修改文件后向 zora 发送 SIGHUP 即可生效。",
+    fileMode:
+      "这些配置来自配置文件。修改文件后向 Wormway 发送 SIGHUP 即可生效。",
   },
   versions: {
     title: "版本",

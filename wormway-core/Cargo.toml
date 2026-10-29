@@ -1,0 +1,30 @@
+[package]
+name = "wormway-core"
+description = "Core types for Wormway: configuration model, route and rule matching, and error types, with no networking framework dependencies"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# JSON Schema of the configuration file, for editors and `wormway schema`
+schema = ["dep:schemars"]
+
+[dependencies]
+regex.workspace = true
+schemars = { workspace = true, optional = true }
+serde.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+serde_json.workspace = true
+
+[[bench]]
+name = "routing"
+harness = false
+
+[lints]
+workspace = true

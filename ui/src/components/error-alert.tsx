@@ -5,7 +5,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { ApiError } from "@/lib/api"
 
 /**
- * Explains a failed request with the message of zora and the problem of each setting.
+ * Explains a failed request with the message of Wormway and the problem of each setting.
  * `message` replaces the message, for errors the page explains better itself.
  */
 export function ErrorAlert({

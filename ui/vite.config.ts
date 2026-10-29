@@ -3,8 +3,8 @@ import tailwindcss from "@tailwindcss/vite"
 import react from "@vitejs/plugin-react"
 import { defineConfig } from "vite"
 
-// zora serves the dashboard under /ui/ on the Admin API port. During development the Vite
-// server forwards API calls to a zora running with the default Admin address.
+// Wormway serves the dashboard under /ui/ on the Admin API port. During development the Vite
+// server forwards API calls to a Wormway running with the default Admin address.
 export default defineConfig({
   base: "/ui/",
   plugins: [react(), tailwindcss()],

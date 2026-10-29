@@ -1,0 +1,32 @@
+[package]
+name = "wormway-gateway"
+description = "HTTP gateway of Wormway: serves the HTTP listeners through Pingora and routes requests to upstreams"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+arc-swap.workspace = true
+async-trait.workspace = true
+http.workspace = true
+pingora.workspace = true
+rustls.workspace = true
+tokio = { workspace = true, features = ["io-util", "net", "time"] }
+tracing.workspace = true
+wormway-core.workspace = true
+wormway-runtime.workspace = true
+wormway-tls.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+h2.workspace = true
+rcgen.workspace = true
+reqwest.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
+tokio-rustls.workspace = true
+
+[lints]
+workspace = true

@@ -1,31 +1,31 @@
 [workspace]
 resolver = "3"
-members = ["zora-core", "zora-runtime", "zora-control", "zora-gateway", "zora-tls", "apps/*"]
+members = ["wormway-core", "wormway-runtime", "wormway-control", "wormway-gateway", "wormway-tls", "apps/*"]
 
 [workspace.package]
 version = "0.0.0"
 edition = "2024"
 rust-version = "1.98"
 authors = ["Zero <zero9501@outlook.com>"]
-homepage = "https://github.com/zlx2019/zora"
-repository = "https://github.com/zlx2019/zora"
+homepage = "https://github.com/zlx2019/wormway"
+repository = "https://github.com/zlx2019/wormway"
 license = "MIT"
 readme = "README.md"
 publish = false
 
 [workspace.dependencies]
-zora-control = { path = "zora-control" }
-zora-core = { path = "zora-core" }
-zora-gateway = { path = "zora-gateway" }
-zora-runtime = { path = "zora-runtime" }
-zora-tls = { path = "zora-tls" }
+wormway-control = { path = "wormway-control" }
+wormway-core = { path = "wormway-core" }
+wormway-gateway = { path = "wormway-gateway" }
+wormway-runtime = { path = "wormway-runtime" }
+wormway-tls = { path = "wormway-tls" }
 
 anyhow = "1.0.104"
 arc-swap = "1.9.3"
 async-trait = "0.1.92"
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "query", "tokio", "tracing"] }
 clap = { version = "4.6.7", features = ["derive", "env"] }
-# Benchmarks only: without parallel analysis and plots, which zora does not use.
+# Benchmarks only: without parallel analysis and plots, which Wormway does not use.
 criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
 getrandom = "0.4.3"
 h2 = "0.4.20"

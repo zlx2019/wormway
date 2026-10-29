@@ -20,16 +20,16 @@ export const en = {
     cli: "Command line",
   },
   login: {
-    title: "Sign in to zora",
+    title: "Sign in to Wormway",
     description:
-      "Enter the Admin API token. zora keeps it in admin.token in its data directory, unless ZORA_ADMIN_TOKEN is set.",
+      "Enter the Admin API token. Wormway keeps it in admin.token in its data directory, unless WORMWAY_ADMIN_TOKEN is set.",
     token: "Token",
     submit: "Sign in",
     wrongToken: "This token is not accepted.",
   },
   overview: {
     title: "Overview",
-    version: "zora version",
+    version: "Wormway version",
     uptime: "Uptime",
     config: "Configuration",
     configVersion: "{{source}}, version {{version}}",
@@ -48,7 +48,7 @@ export const en = {
     version: "Version {{version}}",
     noVersion: "No saved version",
     fileMode:
-      "These settings come from the configuration file. Edit the file and send SIGHUP to zora to change them.",
+      "These settings come from the configuration file. Edit the file and send SIGHUP to Wormway to change them.",
   },
   versions: {
     title: "Versions",

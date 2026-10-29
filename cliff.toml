@@ -57,7 +57,7 @@ footer = """
 trim = true
 # %REPO% is replaced with the repository URL, so the URL lives in one place.
 postprocessors = [
-    { pattern = '%REPO%', replace = "https://github.com/zlx2019/zora" },
+    { pattern = '%REPO%', replace = "https://github.com/zlx2019/wormway" },
 ]
 
 [git]

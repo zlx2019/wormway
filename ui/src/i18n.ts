@@ -8,7 +8,7 @@ import { zh } from "@/locales/zh"
 export type Language = "en" | "zh"
 
 /** Key of the chosen language in localStorage. */
-const LANGUAGE_KEY = "zora.language"
+const LANGUAGE_KEY = "wormway.language"
 
 /** The chosen language; before a choice, Chinese for Chinese browsers and English otherwise. */
 function initialLanguage(): Language {

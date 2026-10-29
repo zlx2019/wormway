@@ -22,7 +22,7 @@ import { VersionsPage } from "@/pages/versions"
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
-      // An error answered by zora comes back when asked again; a network error may not.
+      // An error answered by Wormway comes back when asked again; a network error may not.
       retry: (failures, error) => !(error instanceof ApiError) && failures < 2,
     },
   },

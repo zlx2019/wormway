@@ -4051,6 +4051,113 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
+name = "wormway"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "rcgen",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "wormway-control",
+ "wormway-core",
+ "wormway-gateway",
+ "wormway-runtime",
+ "wormway-tls",
+]
+
+[[package]]
+name = "wormway-control"
+version = "0.0.0"
+dependencies = [
+ "axum",
+ "getrandom 0.4.3",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "rust-embed",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "subtle",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tower",
+ "tracing",
+ "wormway-core",
+ "wormway-runtime",
+]
+
+[[package]]
+name = "wormway-core"
+version = "0.0.0"
+dependencies = [
+ "criterion",
+ "regex",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "toml",
+]
+
+[[package]]
+name = "wormway-gateway"
+version = "0.0.0"
+dependencies = [
+ "arc-swap",
+ "async-trait",
+ "axum",
+ "h2",
+ "http",
+ "pingora",
+ "rcgen",
+ "reqwest",
+ "rustls",
+ "tempfile",
+ "tokio",
+ "tokio-rustls",
+ "tracing",
+ "wormway-core",
+ "wormway-runtime",
+ "wormway-tls",
+]
+
+[[package]]
+name = "wormway-runtime"
+version = "0.0.0"
+dependencies = [
+ "arc-swap",
+ "metrics",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "wormway-core",
+]
+
+[[package]]
+name = "wormway-tls"
+version = "0.0.0"
+dependencies = [
+ "arc-swap",
+ "rcgen",
+ "rustls",
+ "rustls-pki-types",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "wormway-core",
+ "wormway-runtime",
+ "x509-parser 0.16.0",
+]
+
+[[package]]
 name = "writeable"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4215,113 +4322,6 @@ name = "zmij"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
-
-[[package]]
-name = "zora"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "clap",
- "rcgen",
- "reqwest",
- "rustls",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "zora-control",
- "zora-core",
- "zora-gateway",
- "zora-runtime",
- "zora-tls",
-]
-
-[[package]]
-name = "zora-control"
-version = "0.0.0"
-dependencies = [
- "axum",
- "getrandom 0.4.3",
- "metrics",
- "metrics-exporter-prometheus",
- "rust-embed",
- "serde",
- "serde_json",
- "sqlx",
- "subtle",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "tower",
- "tracing",
- "zora-core",
- "zora-runtime",
-]
-
-[[package]]
-name = "zora-core"
-version = "0.0.0"
-dependencies = [
- "criterion",
- "regex",
- "schemars",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "toml",
-]
-
-[[package]]
-name = "zora-gateway"
-version = "0.0.0"
-dependencies = [
- "arc-swap",
- "async-trait",
- "axum",
- "h2",
- "http",
- "pingora",
- "rcgen",
- "reqwest",
- "rustls",
- "tempfile",
- "tokio",
- "tokio-rustls",
- "tracing",
- "zora-core",
- "zora-runtime",
- "zora-tls",
-]
-
-[[package]]
-name = "zora-runtime"
-version = "0.0.0"
-dependencies = [
- "arc-swap",
- "metrics",
- "thiserror 2.0.21",
- "tokio",
- "tokio-util",
- "tracing",
- "zora-core",
-]
-
-[[package]]
-name = "zora-tls"
-version = "0.0.0"
-dependencies = [
- "arc-swap",
- "rcgen",
- "rustls",
- "rustls-pki-types",
- "tempfile",
- "tokio",
- "tracing",
- "x509-parser 0.16.0",
- "zora-core",
- "zora-runtime",
-]
 
 [[package]]
 name = "zstd"

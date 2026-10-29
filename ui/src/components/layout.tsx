@@ -30,7 +30,7 @@ export function Layout() {
     <div className="min-h-svh">
       <header className="border-b">
         <div className="mx-auto flex h-14 max-w-5xl items-center gap-6 px-4">
-          <span className="font-semibold">zora</span>
+          <span className="font-semibold">Wormway</span>
           <nav className="flex gap-4 text-sm">
             {pages.map((page) => (
               <NavLink

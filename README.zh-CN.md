@@ -1,10 +1,10 @@
-# zora
+# Wormway
 
 [English](README.md)
 
 用 Rust 编写的可编程网络流量代理**库**，以及基于它构建的开箱即用**程序**：网关、多协议代理、反向隧道与 Web 面板。
 
-> **状态：发布前（pre-release）。** zora 由一人维护。目前没有任何发布（没有 crates.io 版本，也没有二进制），一切都可能不经通知地变化。
+> **状态：发布前（pre-release）。** Wormway 由一人维护。目前没有任何发布（没有 crates.io 版本，也没有二进制），一切都可能不经通知地变化。
 
 ## 规划范围
 
@@ -15,7 +15,7 @@
 | 反向隧道 | 把位于 NAT 后的服务通过网关对外发布。 |
 | 面板 | Web 界面与 Admin API，管理配置、证书、用户与流量。 |
 
-交付物：一组可嵌入的 crate（`zora-*`），以及把它们装配起来的单一二进制 `zora`。配置文件为 TOML（`zora.toml`）。
+交付物：一组可嵌入的 crate（`wormway-*`），以及把它们装配起来的单一二进制 `wormway`。配置文件为 TOML（`wormway.toml`）。
 
 暂不涉及：面向终端用户的代理客户端（TUN、系统代理、客户端规则分流）。
 
@@ -23,12 +23,12 @@
 
 | 路径 | 内容 |
 |---|---|
-| `zora-*/` | 库 crate，每个一个目录：`zora-core`（配置模型与路由匹配）、`zora-runtime`（监听器、配置热更新与优雅关闭）、`zora-gateway`（基于 Pingora 的 HTTP 网关：路由与负载均衡的上游）、`zora-tls`（按客户端发送的主机名选择证书）、`zora-control`（SQLite 存储与配置版本、Admin API、Prometheus 指标、面板）。 |
-| `apps/zora/` | `zora` 二进制：`zora run`、`zora check`（校验配置文件）、`zora schema`，以及 `zora config export` 和 `zora config apply`（通过 Admin API 导出、应用运行中 zora 的动态配置）。目前还没有内置任何协议，所以 `zora run` 只接受不含监听器的配置。 |
-| `ui/` | 面板（React 与 TypeScript）。zora 在 Admin API 地址的 `/ui/` 下提供面板，默认是 `http://127.0.0.1:9872/ui/`，登录时输入 Admin API 的 token。 |
+| `wormway-*/` | 库 crate，每个一个目录：`wormway-core`（配置模型与路由匹配）、`wormway-runtime`（监听器、配置热更新与优雅关闭）、`wormway-gateway`（基于 Pingora 的 HTTP 网关：路由与负载均衡的上游）、`wormway-tls`（按客户端发送的主机名选择证书）、`wormway-control`（SQLite 存储与配置版本、Admin API、Prometheus 指标、面板）。 |
+| `apps/wormway/` | `wormway` 二进制：`wormway run`、`wormway check`（校验配置文件）、`wormway schema`，以及 `wormway config export` 和 `wormway config apply`（通过 Admin API 导出、应用运行中 Wormway 的动态配置）。目前还没有内置任何协议，所以 `wormway run` 只接受不含监听器的配置。 |
+| `ui/` | 面板（React 与 TypeScript）。Wormway 在 Admin API 地址的 `/ui/` 下提供面板，默认是 `http://127.0.0.1:9872/ui/`，登录时输入 Admin API 的 token。 |
 | `benches/` | 性能测量的方法，以及开放负载压测和记录测试环境的脚本。 |
-| `zora.example.toml` | 示例配置。 |
-| `zora.schema.json` | 配置文件的 JSON Schema，由 `zora schema` 生成。编辑器用它补全和校验，例如 VS Code 装上 Even Better TOML 后，示例开头的 `#:schema` 一行即可生效。 |
+| `wormway.example.toml` | 示例配置。 |
+| `wormway.schema.json` | 配置文件的 JSON Schema，由 `wormway schema` 生成。编辑器用它补全和校验，例如 VS Code 装上 Even Better TOML 后，示例开头的 `#:schema` 一行即可生效。 |
 
 ## 开发
 
@@ -44,11 +44,11 @@ typos
 pre-commit install   # 可选：把这些检查装成 Git 钩子
 ```
 
-面板需要 Node.js 22.22 及以上和 pnpm 10。要先构建面板再构建 zora：release 构建会把 `ui/dist` 嵌入程序，debug 构建运行时从磁盘读取；没有构建面板时，zora 会返回一个说明构建方法的页面。
+面板需要 Node.js 22.22 及以上和 pnpm 10。要先构建面板再构建 Wormway：release 构建会把 `ui/dist` 嵌入程序，debug 构建运行时从磁盘读取；没有构建面板时，Wormway 会返回一个说明构建方法的页面。
 
 ```sh
 pnpm --dir ui install
-pnpm --dir ui dev     # http://localhost:5173/ui/，API 请求转发给 127.0.0.1:9872 上的 zora
+pnpm --dir ui dev     # http://localhost:5173/ui/，API 请求转发给 127.0.0.1:9872 上的 Wormway
 pnpm --dir ui lint
 pnpm --dir ui build   # 输出到 ui/dist
 ```
@@ -65,4 +65,4 @@ pnpm --dir ui build   # 输出到 ui/dist
 
 ## 使用声明
 
-zora 是通用的网络代理与网关工具集，面向合法用途，例如 API 网关、反向代理、安全访问自己的服务以及网络研究。使用者需自行遵守所在地区的法律法规，以及所连接的网络与服务的条款。本软件按「现状」提供，不附带任何形式的担保（见 [LICENSE](LICENSE)）。
+Wormway 是通用的网络代理与网关工具集，面向合法用途，例如 API 网关、反向代理、安全访问自己的服务以及网络研究。使用者需自行遵守所在地区的法律法规，以及所连接的网络与服务的条款。本软件按「现状」提供，不附带任何形式的担保（见 [LICENSE](LICENSE)）。

@@ -89,7 +89,7 @@ async function request<T>(
 ): Promise<T> {
   const headers = new Headers(init.headers)
   // Versions saved from here are marked as changes made in the dashboard.
-  headers.set("Zora-Client", "ui")
+  headers.set("Wormway-Client", "ui")
   if (token !== null) {
     headers.set("Authorization", `Bearer ${token}`)
   }
@@ -112,7 +112,7 @@ async function request<T>(
 
 /** The endpoints of the Admin API the dashboard uses. */
 export const api = {
-  /** Status of zora; with `token`, checks that token instead of the stored one. */
+  /** Status of Wormway; with `token`, checks that token instead of the stored one. */
   status: (token?: string) => request<Status>("/status", {}, token),
 
   /** The dynamic settings in effect. */

@@ -132,7 +132,8 @@ jobs:
         with:
           command: check
 
-  # The dashboard in ui/. The Rust jobs do not need it: without ui/dist zora serves a placeholder.
+  # The dashboard in ui/. The Rust jobs do not need it: without ui/dist Wormway serves a
+  # placeholder.
   ui:
     name: ui
     runs-on: ubuntu-latest

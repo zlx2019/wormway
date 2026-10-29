@@ -13,21 +13,22 @@ yanked = "deny"
 # The entries below come with Pingora 0.9.0, which has no release without them: review them at
 # every Pingora upgrade.
 ignore = [
-    # rustls-pemfile is unmaintained. Pingora's rustls backend depends on it, and zora reads PEM
+    # rustls-pemfile is unmaintained. Pingora's rustls backend depends on it, and Wormway reads PEM
     # with rustls-pki-types instead.
-    { id = "RUSTSEC-2025-0134", reason = "pulled in by Pingora, not used by zora" },
+    { id = "RUSTSEC-2025-0134", reason = "pulled in by Pingora, not used by Wormway" },
     # derivative is unmaintained; Pingora derives traits with it at compile time.
     { id = "RUSTSEC-2024-0388", reason = "pulled in by Pingora, compile time only" },
-    # unsafe-libyaml is unmaintained; it reads Pingora's YAML configuration, which zora never loads.
-    { id = "RUSTSEC-2024-0449", reason = "pulled in by Pingora, zora reads no YAML" },
+    # unsafe-libyaml is unmaintained; it reads Pingora's YAML configuration, which Wormway never
+    # loads.
+    { id = "RUSTSEC-2024-0449", reason = "pulled in by Pingora, Wormway reads no YAML" },
     # Flaws of zstd 0.13, fixed in zstd 0.14 and zstd-safe 8, which Pingora 0.9.0 does not accept.
-    # zora reaches zstd only when routes with compress = true answer clients that ask for zstd:
+    # Wormway reaches zstd only when routes with compress = true answer clients that ask for zstd:
     # Pingora then compresses with a new encoder for each response. The flaws lie in reused
     # contexts, seekable archives and streaming decompression, which that never touches. Pingora's
     # HTTP cache uses zstd too; enabling it requires a Pingora release with the fixed zstd first.
-    { id = "RUSTSEC-2026-0391", reason = "zora's compression makes a new zstd context for each response" },
-    { id = "RUSTSEC-2026-0398", reason = "seekable zstd archives, which zora does not read" },
-    { id = "RUSTSEC-2026-0403", reason = "zstd decompression, which zora does not do" },
+    { id = "RUSTSEC-2026-0391", reason = "Wormway's compression makes a new zstd context for each response" },
+    { id = "RUSTSEC-2026-0398", reason = "seekable zstd archives, which Wormway does not read" },
+    { id = "RUSTSEC-2026-0403", reason = "zstd decompression, which Wormway does not do" },
 ]
 
 [licenses]
