@@ -25,6 +25,8 @@ arc-swap = "1.9.3"
 async-trait = "0.1.92"
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "query", "tokio", "tracing"] }
 clap = { version = "4.6.7", features = ["derive", "env"] }
+# Benchmarks only: without parallel analysis and plots, which zora does not use.
+criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
 getrandom = "0.4.3"
 h2 = "0.4.20"
 metrics = "0.24.6"
@@ -32,6 +34,7 @@ metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 # Pinned: every 0.x release breaks the API. Upgrades happen between milestones.
 pingora = { version = "=0.9.0", default-features = false, features = ["lb", "proxy", "rustls"] }
 rcgen = { version = "0.14.10", default-features = false, features = ["aws_lc_rs", "pem"] }
+regex = "1.13.1"
 reqwest = { version = "0.13.5", default-features = false, features = ["json"] }
 rust-embed = "8.13.0"
 # aws-lc-rs with post-quantum key exchange first; Pingora also compiles in ring.

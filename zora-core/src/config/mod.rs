@@ -12,6 +12,7 @@
 mod certificate;
 mod duration;
 mod error;
+mod http;
 mod listener;
 mod name;
 mod route;
@@ -26,9 +27,13 @@ use serde::{Deserialize, Serialize};
 pub use certificate::Certificate;
 pub use duration::{Duration, ParseDurationError};
 pub use error::{ConfigError, Issue, ParseError, Position};
+pub use http::{HeaderName, InvalidHeaderName, InvalidMethod, Method};
 pub use listener::{HttpSettings, Listener, ListenerTls, Protocol, UnknownSni};
 pub use name::{InvalidName, Name};
-pub use route::{HostPattern, InvalidHostPattern, Route, RouteMatch};
+pub use route::{
+    HeaderCondition, HostPattern, InvalidHostPattern, InvalidRegex, PathPattern, PathRegex, Route,
+    RouteMatch,
+};
 pub use settings::{
     AdminSettings, ConfigSettings, ConfigSource, LogFormat, LogSettings, ServerSettings,
     StorageSettings,

@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use zora_core::config::{Config, Issue, Name, Protocol, Upstream};
-use zora_core::routing::Router;
+use zora_core::routing::{Request, Router};
 use zora_runtime::{BoxFuture, Engine, Staged};
 
 use crate::upstream::UpstreamRuntime;
@@ -31,14 +31,13 @@ pub(crate) struct CompiledRoute {
 }
 
 impl GatewaySnapshot {
-    /// Returns the route of a request on `listener` for `host` and `path`.
+    /// Returns the route of `request` on `listener`.
     pub(crate) fn route(
         &self,
         listener: &str,
-        host: Option<&str>,
-        path: &str,
+        request: &Request<'_>,
     ) -> Option<&Arc<CompiledRoute>> {
-        self.routers.get(listener)?.find(host, path)
+        self.routers.get(listener)?.find(request)
     }
 
     /// Compiles `config`, reusing the upstreams of `self` whose settings did not change.
@@ -74,8 +73,7 @@ impl GatewaySnapshot {
                 let own = routes.iter().filter(|(route, _)| {
                     route.listeners.is_empty() || route.listeners.contains(listener)
                 });
-                let router =
-                    Router::new(own.map(|(route, compiled)| (&route.r#match, compiled.clone())));
+                let router = Router::new(own.map(|(route, compiled)| (*route, compiled.clone())));
                 (listener.clone(), router)
             })
             .collect();
@@ -156,11 +154,43 @@ impl Staged for Compiled {
 
 #[cfg(test)]
 mod tests {
+    use zora_core::routing::RequestHeaders;
+
     use super::*;
+
+    /// A request without headers.
+    struct NoHeaders;
+
+    impl RequestHeaders for NoHeaders {
+        /// No header is present.
+        fn contains(&self, _name: &str) -> bool {
+            false
+        }
+
+        /// No header has a value.
+        fn has_value(&self, _name: &str, _value: &[u8]) -> bool {
+            false
+        }
+    }
 
     /// Parses a configuration, adding `version = 1` in front.
     fn parse(text: &str) -> Config {
         Config::from_toml(&format!("version = 1\n{text}")).unwrap()
+    }
+
+    /// The route of `GET /` for `host` on `listener`.
+    fn route<'a>(
+        snapshot: &'a GatewaySnapshot,
+        listener: &str,
+        host: Option<&str>,
+    ) -> Option<&'a Arc<CompiledRoute>> {
+        let request = Request {
+            host,
+            path: b"/",
+            method: "GET",
+            headers: &NoHeaders,
+        };
+        snapshot.route(listener, &request)
     }
 
     /// Two listeners and an upstream that a route of one listener uses.
@@ -187,16 +217,16 @@ mod tests {
             .compile(&parse(BASE))
             .await
             .unwrap();
-        assert!(snapshot.route("web", Some("example.com"), "/").is_some());
-        assert!(snapshot.route("api", Some("example.com"), "/").is_none());
-        assert!(snapshot.route("missing", None, "/").is_none());
+        assert!(route(&snapshot, "web", Some("example.com")).is_some());
+        assert!(route(&snapshot, "api", Some("example.com")).is_none());
+        assert!(route(&snapshot, "missing", None).is_none());
 
         let everywhere = BASE.replace("listeners = [\"web\"]\n", "");
         let snapshot = GatewaySnapshot::default()
             .compile(&parse(&everywhere))
             .await
             .unwrap();
-        assert!(snapshot.route("api", None, "/").is_some());
+        assert!(route(&snapshot, "api", None).is_some());
     }
 
     /// Upstreams whose settings stay the same are reused; changed ones are rebuilt.
@@ -216,7 +246,7 @@ mod tests {
             &first.upstreams["other"],
             &second.upstreams["other"]
         ));
-        let route = second.route("web", None, "/").unwrap();
-        assert!(Arc::ptr_eq(&route.upstream, &second.upstreams["app"]));
+        let found = route(&second, "web", None).unwrap();
+        assert!(Arc::ptr_eq(&found.upstream, &second.upstreams["app"]));
     }
 }

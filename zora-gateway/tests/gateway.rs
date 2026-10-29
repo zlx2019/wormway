@@ -119,6 +119,17 @@ impl Raw {
         self.response().await
     }
 
+    /// Sends `head`, a request without a body that ends with an empty line, and reads the
+    /// response.
+    async fn request(&mut self, head: &str) -> RawResponse {
+        self.stream
+            .get_mut()
+            .write_all(head.as_bytes())
+            .await
+            .expect("write");
+        self.response().await
+    }
+
     /// Sends `GET path` with host `test`.
     async fn send(&mut self, path: &str) {
         let request = format!("GET {path} HTTP/1.1\r\nHost: test\r\n\r\n");
@@ -211,6 +222,60 @@ async fn routes_by_host_and_path() {
     );
     let (status, _) = get_with_host(web, "example.org", "/").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// Methods and headers pick among routes, and paths match after normalization while the
+/// upstream still gets the path as sent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn routes_by_methods_headers_and_normalized_paths() {
+    let admin = upstream("admin").await;
+    let canary = upstream("canary").await;
+    let read = upstream("read").await;
+    let write = upstream("write").await;
+    let server = start(&format!(
+        r#"{WEB}
+        [routes.admin]
+        match = {{ paths = ["/admin/"] }}
+        upstream = "admin"
+        [routes.canary]
+        match = {{ paths = ["/api/"], headers = {{ "X-Canary" = "1" }} }}
+        upstream = "canary"
+        [routes.read]
+        upstream = "read"
+        [routes.write]
+        match = {{ methods = ["POST"] }}
+        upstream = "write"
+        [upstreams.admin]
+        targets = ["{admin}"]
+        [upstreams.canary]
+        targets = ["{canary}"]
+        [upstreams.read]
+        targets = ["{read}"]
+        [upstreams.write]
+        targets = ["{write}"]
+        "#
+    ))
+    .await;
+    let mut raw = Raw::connect(addr(&server, "web").await).await;
+    let mut body = async |method: &str, path: &str, extra: &str| {
+        let head = format!("{method} {path} HTTP/1.1\r\nHost: test\r\n{extra}\r\n");
+        raw.request(&head).await.body
+    };
+    assert_eq!(body("GET", "/api/x", "").await, "read test /api/x");
+    assert_eq!(
+        body("GET", "/api/x", "X-Canary: 1\r\n").await,
+        "canary test /api/x"
+    );
+    let empty = "Content-Length: 0\r\n";
+    assert_eq!(body("POST", "/api/x", empty).await, "write test /api/x");
+    // A more specific path comes before a method condition.
+    assert_eq!(
+        body("POST", "/api/x", &format!("{empty}X-Canary: 1\r\n")).await,
+        "canary test /api/x"
+    );
+    for path in ["/public/../admin/x", "/admin%2Fx", "//admin/x"] {
+        assert_eq!(body("GET", path, "").await, format!("admin test {path}"));
+    }
 }
 
 /// Requests go to the targets in turn, in proportion to their weights.

@@ -201,6 +201,40 @@
       },
       "type": "object"
     },
+    "PathPattern": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "exact": {
+              "description": "This path only.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "exact"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "regex": {
+              "description": "Paths in which this regular expression finds a match; ^ and $ anchor it.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "regex"
+          ],
+          "type": "object"
+        }
+      ],
+      "description": "A path prefix such as \"/api/\", an exact path such as { exact = \"/\" }, or a regular expression such as { regex = \"^/v[0-9]+/\" }."
+    },
     "Protocol": {
       "description": "Protocol served by a listener.",
       "oneOf": [
@@ -213,7 +247,7 @@
     },
     "Route": {
       "additionalProperties": false,
-      "description": "A rule of the HTTP listeners: the requests it matches go to its upstream.\n\nWhen several routes match a request, the most specific one wins: an exact host before a\nwildcard host before any host, then the longest path prefix, then the route name in\nalphabetical order.",
+      "description": "A rule of the HTTP listeners: the requests it matches go to its upstream.\n\nWhen several routes match a request, they are compared in this order, and the first\ndifference decides:\n\n1. the higher `priority`;\n2. an exact host, then a wildcard host, then any host;\n3. an exact path, then a regular expression, then a path prefix, longer prefixes first, then\n   any path;\n4. a route with methods before one without;\n5. the route with more header conditions;\n6. the route name in alphabetical order.",
       "properties": {
         "listeners": {
           "description": "HTTP listeners whose requests the route sees. Without it, every HTTP listener.",
@@ -231,6 +265,11 @@
           ],
           "description": "Which requests the route takes. Without it, every request."
         },
+        "priority": {
+          "description": "Precedence over the other routes that match a request: higher first. Default: 0.",
+          "format": "int32",
+          "type": "integer"
+        },
         "upstream": {
           "description": "Upstream that serves the requests.",
           "pattern": "^[a-z0-9_-]{1,64}$",
@@ -244,8 +283,25 @@
     },
     "RouteMatch": {
       "additionalProperties": false,
-      "description": "Conditions on a request. A request matches when it meets every condition that is set.",
+      "description": "Conditions on a request. A request matches when it meets every condition that is set.\n\nPaths are compared after normalization: every `%XX` decoded, `.` and `..` segments resolved\nand repeated slashes merged, so that `/a/../admin/` and `/admin%2F` both count as paths\nunder `/admin/`.",
       "properties": {
+        "headers": {
+          "additionalProperties": false,
+          "description": "Conditions on headers, by name: a value that one of the values of the header must equal,\n`true` for a header that must be present, or `false` for one that must be absent.",
+          "patternProperties": {
+            "^[A-Za-z0-9!#$%&'*+.^_`|~-]+$": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "boolean"
+                }
+              ]
+            }
+          },
+          "type": "object"
+        },
         "hosts": {
           "description": "Host names, such as `example.com`, or `*.example.com` for one label in front of\n`example.com`. Without it, any host.",
           "items": {
@@ -255,10 +311,18 @@
           },
           "type": "array"
         },
-        "paths": {
-          "description": "Path prefixes, such as `/api/`. A prefix compares characters, not path segments, so `/api`\nalso matches `/apis`. Without it, any path.",
+        "methods": {
+          "description": "Methods, such as `[\"GET\", \"HEAD\"]`. Without it, any method.",
           "items": {
+            "pattern": "^[A-Za-z0-9!#$%&'*+.^_`|~-]+$",
             "type": "string"
+          },
+          "type": "array"
+        },
+        "paths": {
+          "description": "Paths: a prefix such as `\"/api/\"`, an exact path such as `{ exact = \"/\" }`, or a regular\nexpression such as `{ regex = \"^/v[0-9]+/\" }`. Without it, any path.",
+          "items": {
+            "$ref": "#/definitions/PathPattern"
           },
           "type": "array"
         }

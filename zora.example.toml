@@ -41,11 +41,18 @@ protocol = "http"
 # the handshake.
 tls = { certificates = ["example"], unknown_sni = "default" }
 
-# Requests go to the most specific matching route: exact host, then wildcard host, then any
-# host; within those, the longest path prefix.
+# Requests go to the matching route with the highest priority; among equal ones, the most
+# specific: exact host, then wildcard host, then any host; then exact path, then regex, then the
+# longest prefix; then a route with methods; then the one with more header conditions. Paths
+# are compared after decoding %XX, resolving "." and ".." and merging slashes.
 [routes.app]
 listeners = ["web"]                      # default: every HTTP listener
 match = { hosts = ["app.example.com", "*.app.example.com"], paths = ["/"] }
+upstream = "app"
+
+[routes.app-api]
+priority = 0                             # default; higher wins over every other rule
+match = { hosts = ["app.example.com"], paths = ["/api/", { exact = "/health" }, { regex = "^/v[0-9]+/" }], methods = ["GET", "POST"], headers = { "X-Canary" = "1", "Authorization" = true } }
 upstream = "app"
 
 [upstreams.app]

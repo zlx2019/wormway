@@ -5,12 +5,12 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
-use pingora::http::{RequestHeader, ResponseHeader};
+use pingora::http::{HMap, RequestHeader, ResponseHeader};
 use pingora::proxy::{ProxyHttp, Session};
 use pingora::upstreams::peer::HttpPeer;
 use pingora::{Error, ErrorType, HTTPStatus};
 use zora_core::config::Name;
-use zora_core::routing;
+use zora_core::routing::{self, Request, RequestHeaders};
 
 use crate::snapshot::{CompiledRoute, GatewaySnapshot};
 
@@ -46,6 +46,22 @@ impl Proxy {
             keepalive,
         }
     }
+
+    /// Finds the route of `request` in `snapshot`, by its normalized path.
+    fn find_route(
+        &self,
+        request: &RequestHeader,
+        snapshot: &GatewaySnapshot,
+    ) -> Option<Arc<CompiledRoute>> {
+        let path = routing::normalize_path(request.uri.path().as_bytes());
+        let request = Request {
+            host: request_host(request),
+            path: &path,
+            method: request.method.as_str(),
+            headers: &Headers(&request.headers),
+        };
+        snapshot.route(self.listener.as_str(), &request).cloned()
+    }
 }
 
 #[async_trait]
@@ -80,15 +96,7 @@ impl ProxyHttp for Proxy {
         session: &mut Session,
         ctx: &mut RequestContext,
     ) -> pingora::Result<bool> {
-        let request = session.req_header();
-        ctx.route = ctx
-            .snapshot
-            .route(
-                self.listener.as_str(),
-                request_host(request),
-                request.uri.path(),
-            )
-            .cloned();
+        ctx.route = self.find_route(session.req_header(), &ctx.snapshot);
         if ctx.route.is_some() {
             return Ok(false);
         }
@@ -136,4 +144,22 @@ fn request_host(request: &RequestHeader) -> Option<&str> {
         None => request.headers.get("host")?.to_str().ok()?,
     };
     Some(routing::host_name(authority))
+}
+
+/// The headers of a request, as the router reads them.
+struct Headers<'a>(&'a HMap);
+
+impl RequestHeaders for Headers<'_> {
+    /// Whether the request has the header.
+    fn contains(&self, name: &str) -> bool {
+        self.0.contains_key(name)
+    }
+
+    /// Whether one of the values of the header is `value`.
+    fn has_value(&self, name: &str, value: &[u8]) -> bool {
+        self.0
+            .get_all(name)
+            .iter()
+            .any(|candidate| candidate.as_bytes() == value)
+    }
 }

@@ -3,7 +3,8 @@
 use std::collections::HashSet;
 use std::net::SocketAddr;
 
-use super::{Config, ConfigSource, Issue, Target};
+use super::{Config, ConfigSource, Issue, PathPattern, Target};
+use crate::routing::normalize_path;
 
 /// Returns every rule violation in `config`.
 pub(super) fn errors(config: &Config) -> Vec<Issue> {
@@ -89,7 +90,7 @@ fn check_address_conflicts(config: &Config, issues: &mut Vec<Issue>) {
     }
 }
 
-/// Each route names existing listeners and an existing upstream, and its paths are absolute.
+/// Each route names existing listeners and an existing upstream, and its paths can match.
 fn check_routes(config: &Config, issues: &mut Vec<Issue>) {
     for (name, route) in &config.routes {
         for (i, listener) in route.listeners.iter().enumerate() {
@@ -101,10 +102,10 @@ fn check_routes(config: &Config, issues: &mut Vec<Issue>) {
             }
         }
         for (i, path) in route.r#match.paths.iter().enumerate() {
-            if !path.starts_with('/') {
+            if let Some(problem) = path_problem(path) {
                 issues.push(Issue::new(
                     format!("routes.{name}.match.paths[{i}]"),
-                    "must start with \"/\"",
+                    problem,
                 ));
             }
         }
@@ -115,6 +116,40 @@ fn check_routes(config: &Config, issues: &mut Vec<Issue>) {
             ));
         }
     }
+}
+
+/// Returns why a path condition can never match, if it cannot: request paths start with "/" and
+/// are compared after normalization, so a prefix or an exact path must be in normal form.
+fn path_problem(pattern: &PathPattern) -> Option<String> {
+    let (path, exact) = match pattern {
+        PathPattern::Prefix(path) => (path, false),
+        PathPattern::Exact(path) => (path, true),
+        PathPattern::Regex(_) => return None,
+    };
+    if !path.starts_with('/') {
+        return Some("must start with \"/\"".to_owned());
+    }
+    // A prefix may end in the middle of a segment, such as "/." for "/.well-known/": a letter
+    // after it keeps that part from reading as a "." or ".." segment.
+    let written = if exact {
+        path.clone()
+    } else {
+        format!("{path}x")
+    };
+    let normal = normalize_path(written.as_bytes());
+    if *normal == *written.as_bytes() {
+        return None;
+    }
+    let normal = String::from_utf8_lossy(&normal);
+    let suggestion = if exact {
+        &normal
+    } else {
+        normal.strip_suffix('x').unwrap_or(&normal)
+    };
+    Some(format!(
+        "never matches: request paths are compared after decoding %XX, removing \".\" and \"..\" \
+         segments and merging slashes, so write \"{suggestion}\""
+    ))
 }
 
 /// Each upstream has targets, each listed once and with a weight in range.
@@ -268,6 +303,54 @@ mod tests {
         assert_eq!(issues[2].message, "unknown upstream \"nowhere\"");
         assert_eq!(issues[3].message, "10.0.0.1:80 is listed twice");
         assert_eq!(issues[4].message, "must be between 1 and 256");
+    }
+
+    /// Prefixes and exact paths must be in the form that request paths take after
+    /// normalization; regular expressions are not checked.
+    #[test]
+    fn rejects_paths_that_never_match() {
+        let config = parse(
+            r#"
+            version = 1
+            [routes.site]
+            match = { paths = ["/", "/a/.", "/.well-known/", "/a/..b", "//a", "/a/./b", "/a%2Fb", { exact = "/a/" }, { exact = "/a/." }, { exact = "api" }, { regex = "//" }] }
+            upstream = "app"
+            [upstreams.app]
+            targets = ["127.0.0.1:9000"]
+            "#,
+        );
+        let issues = errors(&config);
+        assert_eq!(
+            paths(&issues),
+            [
+                "routes.site.match.paths[4]",
+                "routes.site.match.paths[5]",
+                "routes.site.match.paths[6]",
+                "routes.site.match.paths[8]",
+                "routes.site.match.paths[9]",
+            ]
+        );
+        assert!(
+            issues[0].message.ends_with("so write \"/a\""),
+            "{}",
+            issues[0]
+        );
+        assert!(
+            issues[1].message.ends_with("so write \"/a/b\""),
+            "{}",
+            issues[1]
+        );
+        assert!(
+            issues[2].message.ends_with("so write \"/a/b\""),
+            "{}",
+            issues[2]
+        );
+        assert!(
+            issues[3].message.ends_with("so write \"/a/\""),
+            "{}",
+            issues[3]
+        );
+        assert_eq!(issues[4].message, "must start with \"/\"");
     }
 
     /// h2c is for listeners without TLS only.
