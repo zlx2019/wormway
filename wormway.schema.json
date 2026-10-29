@@ -173,6 +173,100 @@
       },
       "type": "object"
     },
+    "HealthCheck": {
+      "additionalProperties": false,
+      "description": "Active health checks: every target is probed at an interval, a target that fails gets no\nrequests until it passes again, and a new target is probed once before it gets any.",
+      "properties": {
+        "healthy": {
+          "description": "Probes in a row that an unhealthy target must pass to get requests again. Default: 2.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "host": {
+          "description": "`Host` header of the request of `\"http\"`, such as `\"api.internal\"`. Default: `tls.sni`\nif set, otherwise the host name of the target or its IP address; with the port of the\ntarget, unless it is 80, or 443 with TLS.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "interval": {
+          "description": "Time between the probes of a target. Default: `\"5s\"`.",
+          "pattern": "^([0-9]+(ms|s|m|h|d))+$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/HealthCheckKind"
+            }
+          ],
+          "description": "How a target is probed."
+        },
+        "path": {
+          "description": "Path and query of the request of `\"http\"`. Default: `\"/\"`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "description": "Statuses that pass, for `\"http\"`. Default: 200 to 399.",
+          "items": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "timeout": {
+          "description": "Longest wait for a probe, from connecting to the response header. Default: `\"2s\"`.",
+          "pattern": "^([0-9]+(ms|s|m|h|d))+$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "unhealthy": {
+          "description": "Probes in a row that a healthy target must fail to get no more requests. Default: 3.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "type": "object"
+    },
+    "HealthCheckKind": {
+      "description": "How a health check probes a target.",
+      "oneOf": [
+        {
+          "const": "tcp",
+          "description": "A TCP connection, without TLS.",
+          "type": "string"
+        },
+        {
+          "const": "http",
+          "description": "A `GET` request with the protocol and the TLS settings of the upstream; a status in\n`status` passes.",
+          "type": "string"
+        }
+      ]
+    },
     "HttpSettings": {
       "additionalProperties": false,
       "description": "HTTP settings of a listener. Settings left out follow the defaults of the running Wormway.",
@@ -301,6 +395,30 @@
           "default": "info",
           "description": "Log filter in `tracing` directive syntax, such as `\"info\"` or\n`\"info,wormway_runtime=debug\"`.",
           "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "PassiveCheck": {
+      "additionalProperties": false,
+      "description": "Passive health checks, as in Nginx: a target whose requests fail `max_fails` times within\n`fail_timeout` gets no requests for `fail_timeout`. Failing means that the connection, its\nTLS, sending the request or waiting for the response header failed or ran out of time; a\nresponse passes whatever its status.",
+      "properties": {
+        "fail_timeout": {
+          "description": "Time in which the failures count, and for which the target is out. Default: `\"10s\"`.",
+          "pattern": "^([0-9]+(ms|s|m|h|d))+$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "max_fails": {
+          "description": "Failures within `fail_timeout` that take a target out. Default: 1.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
       "type": "object"
@@ -725,6 +843,28 @@
             }
           ],
           "description": "What `consistent_hash` hashes. A request without it, such as one without the header,\nhashes its client IP address instead. Default: `\"client_ip\"`."
+        },
+        "health_check": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/HealthCheck"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Probe the targets at an interval and send requests only to those that pass."
+        },
+        "passive": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PassiveCheck"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Keep requests away for a while from targets whose requests fail. Off when not set;\n`passive = {}` turns it on with the defaults."
         },
         "protocol": {
           "anyOf": [

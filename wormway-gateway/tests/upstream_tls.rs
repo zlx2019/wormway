@@ -494,3 +494,99 @@ async fn passes_trailers_for_grpc() {
         ("h2c /grpc".to_owned(), Some("0".to_owned()))
     );
 }
+
+/// Health checks reach the targets the way requests do: over TLS checked against the
+/// authorities of the upstream, and with HTTP/2. The target with a certificate from another
+/// authority fails its probe and gets no requests.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn checks_health_over_the_upstream_tls() {
+    let pki = Pki::new();
+    let h2_only = || TlsUpstream {
+        names: &["127.0.0.1"],
+        alpn: &[b"h2"],
+        client_auth: false,
+    };
+    let (trusted, connections) = tls_upstream(&pki, h2_only()).await;
+    let (untrusted, _) = tls_upstream(&Pki::new(), h2_only()).await;
+    let settings = format!(
+        "targets = [\"{trusted}\", \"{untrusted}\"]\nprotocol = \"h2\"\ntls = {{ ca = \"ca.crt\" }}\n\
+         retries = 0\nhealth_check = {{ kind = \"http\", path = \"/healthz\", interval = \"1h\" }}"
+    );
+    let server = pki.start(&route("checked", "/checked", &settings)).await;
+    let web = addr(&server, "web").await;
+    for _ in 0..4 {
+        assert_eq!(
+            get(web, "/checked").await,
+            (200, "sni=- client=false alpn=h2 /checked".to_owned())
+        );
+    }
+    // One connection for the probe, which closed after it, and one for the requests.
+    assert_eq!(connections.load(Ordering::SeqCst), 2);
+}
+
+/// Every probe makes its own connection, over HTTP/2 too, and closes it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn opens_a_connection_for_each_probe() {
+    let (plain, connections) = h2c_upstream().await;
+    let settings = format!(
+        "targets = [\"{plain}\"]\nprotocol = \"h2c\"\n\
+         health_check = {{ kind = \"http\", path = \"/healthz\", interval = \"100ms\" }}"
+    );
+    let _server = Pki::new().start(&route("h2c", "/h2c", &settings)).await;
+    let deadline = tokio::time::Instant::now() + LIMIT;
+    while connections.load(Ordering::SeqCst) < 3 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "probes reuse connections"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// The probes take the TLS settings of a change once it is in effect: with authorities that do
+/// not check out the certificate of the target, requests fail, and then the probes too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hands_new_tls_settings_to_the_probes() {
+    let pki = Pki::new();
+    pki.write("other.crt", &authority().pem());
+    let (upstream, _) = tls_upstream(
+        &pki,
+        TlsUpstream {
+            names: &["127.0.0.1"],
+            alpn: &[b"http/1.1"],
+            client_auth: false,
+        },
+    )
+    .await;
+    let settings = |ca: &str| {
+        route(
+            "checked",
+            "/checked",
+            &format!(
+                "targets = [\"{upstream}\"]\ntls = {{ ca = \"{ca}\" }}\nretries = 0\n\
+                 health_check = {{ kind = \"http\", path = \"/healthz\", interval = \"100ms\", unhealthy = 1 }}"
+            ),
+        )
+    };
+    let server = pki.start(&settings("ca.crt")).await;
+    let web = addr(&server, "web").await;
+    assert_eq!(get(web, "/checked").await.0, 200);
+
+    let text = format!("{WEB}{}", settings("other.crt"));
+    if let Err(error) = server.apply(common::parse(&text)).await {
+        panic!("cannot apply: {error:?}");
+    }
+    let deadline = tokio::time::Instant::now() + LIMIT;
+    loop {
+        let status = get(web, "/checked").await.0;
+        if status == 503 {
+            break;
+        }
+        assert_eq!(status, 502);
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "probes kept the old authorities"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}

@@ -5,13 +5,15 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use wormway_core::config::{Config, Issue, Name, Protocol, Upstream};
+use wormway_core::config::{Config, HealthCheckKind, Issue, Name, Protocol, Upstream};
 use wormway_core::routing::{Request, Router};
 use wormway_runtime::{BoxFuture, Engine, Staged};
 use wormway_tls::Certificates;
 
+use crate::health::UpstreamHealth;
+use crate::probe::Prober;
 use crate::route::CompiledRoute;
-use crate::upstream::{CompiledUpstream, UpstreamRuntime};
+use crate::upstream::{self, CompiledUpstream, Connect, UpstreamRuntime};
 use crate::upstream_tls::PeerTls;
 
 /// Most targets of one upstream: Pingora's load balancer indexes them with 16 bits.
@@ -23,8 +25,8 @@ const MAX_TARGETS: usize = u16::MAX as usize;
 pub(crate) struct GatewaySnapshot {
     /// The router of each HTTP listener.
     routers: HashMap<Name, Router<Arc<CompiledRoute>>>,
-    /// Upstreams by name. The next compilation reuses the runtimes whose targets and balancing
-    /// stay the same.
+    /// Upstreams by name. The next compilation reuses the runtimes whose targets, balancing and
+    /// health checks stay the same.
     upstreams: BTreeMap<Name, Arc<CompiledUpstream>>,
 }
 
@@ -38,13 +40,14 @@ impl GatewaySnapshot {
         self.routers.get(listener)?.find(request)
     }
 
-    /// Compiles `config`, reusing the upstream runtimes of `self` whose targets and balancing
-    /// did not change. The TLS files of upstreams are read again, relative to the configuration
-    /// file of `certificates`.
+    /// Compiles `config`, reusing the upstream runtimes of `self` whose targets, balancing and
+    /// health checks did not change. The TLS files of upstreams are read again, relative to the
+    /// configuration file of `certificates`; `prober` makes the probes of the health checks.
     async fn compile(
         &self,
         config: &Config,
         certificates: &Certificates,
+        prober: &Arc<Prober>,
     ) -> Result<Self, Vec<Issue>> {
         let mut issues = Vec::new();
         let mut upstreams = BTreeMap::new();
@@ -53,15 +56,23 @@ impl GatewaySnapshot {
                 Some(tls) => PeerTls::load(name, tls, certificates).await.map(Some),
                 None => Ok(None),
             };
-            match (self.upstream(name, settings).await, tls) {
-                (Ok(runtime), Ok(tls)) => {
-                    let compiled = CompiledUpstream::new(runtime, settings, tls);
+            let connect = match tls {
+                Ok(tls) => Arc::new(Connect::new(settings.protocol(), tls)),
+                Err(problems) => {
+                    // Report the targets that do not resolve as well.
+                    if let Err(targets) = upstream::resolve(&settings.targets).await {
+                        issues.extend(target_issues(name, targets));
+                    }
+                    issues.extend(problems);
+                    continue;
+                }
+            };
+            match self.upstream(name, settings, &connect, prober).await {
+                Ok(runtime) => {
+                    let compiled = CompiledUpstream::new(runtime, settings, connect);
                     upstreams.insert(name.clone(), Arc::new(compiled));
                 }
-                (runtime, tls) => {
-                    issues.extend(runtime.err().into_iter().flatten());
-                    issues.extend(tls.err().into_iter().flatten());
-                }
+                Err(problems) => issues.extend(problems),
             }
         }
         if !issues.is_empty() {
@@ -93,34 +104,56 @@ impl GatewaySnapshot {
         Ok(Self { routers, upstreams })
     }
 
-    /// Returns the runtime of upstream `name`: the running one if its targets and balancing are
-    /// the same, otherwise a new one, with its host names resolved.
+    /// Returns the runtime of upstream `name`: the running one if its targets, balancing and
+    /// health checks are the same, otherwise a new one, with its host names resolved. A new
+    /// runtime keeps the health of the running one while the health checks stay the same, and
+    /// probes its targets that were never probed through `connect`.
     async fn upstream(
         &self,
         name: &Name,
         settings: &Upstream,
+        connect: &Arc<Connect>,
+        prober: &Arc<Prober>,
     ) -> Result<Arc<UpstreamRuntime>, Vec<Issue>> {
-        if let Some(running) = self.upstreams.get(name)
-            && running.runtime.serves(settings)
+        let running = self.upstreams.get(name).map(|running| &running.runtime);
+        if let Some(running) = running
+            && running.serves(settings)
         {
-            return Ok(running.runtime.clone());
+            return Ok(running.clone());
         }
-        let path = format!("upstreams.{name}.targets");
         if settings.targets.len() > MAX_TARGETS {
             return Err(vec![Issue::new(
-                path,
+                format!("upstreams.{name}.targets"),
                 format!("at most {MAX_TARGETS} targets are supported"),
             )]);
         }
-        UpstreamRuntime::new(name, settings)
+        let health = match running.and_then(|running| running.health()) {
+            Some(health) if health.checks_as(settings) => Some(health.clone()),
+            _ => {
+                let http = settings
+                    .health_check
+                    .as_ref()
+                    .is_some_and(|check| check.kind == HealthCheckKind::Http);
+                if http && let Err(problem) = prober.connector().await {
+                    let at = format!("upstreams.{name}.health_check");
+                    return Err(vec![Issue::new(at, problem)]);
+                }
+                UpstreamHealth::new(name, settings, prober.clone(), connect.clone())
+            }
+        };
+        UpstreamRuntime::new(name, settings, health, connect)
             .await
-            .map_err(|problems| {
-                problems
-                    .into_iter()
-                    .map(|(index, problem)| Issue::new(format!("{path}[{index}]"), problem))
-                    .collect()
-            })
+            .map_err(|problems| target_issues(name, problems))
     }
+}
+
+/// Returns the problems with the targets of upstream `name`, which come with the index of
+/// their target.
+fn target_issues(name: &Name, problems: Vec<(usize, String)>) -> Vec<Issue> {
+    problems
+        .into_iter()
+        .map(|(index, problem)| Issue::new(format!("upstreams.{name}.targets[{index}]"), problem))
+        .collect()
 }
 
 /// The engine of the gateway: compiles the routes and upstreams of each configuration into a
@@ -130,6 +163,8 @@ pub(crate) struct Routing {
     snapshot: Arc<ArcSwap<GatewaySnapshot>>,
     /// Reads the TLS files of upstreams, relative to the configuration file.
     certificates: Certificates,
+    /// Makes the probes of the health checks of every upstream.
+    prober: Arc<Prober>,
 }
 
 impl Routing {
@@ -139,6 +174,7 @@ impl Routing {
         Self {
             snapshot,
             certificates,
+            prober: Arc::default(),
         }
     }
 }
@@ -153,7 +189,7 @@ impl Engine for Routing {
             let next = self
                 .snapshot
                 .load_full()
-                .compile(config, &self.certificates)
+                .compile(config, &self.certificates, &self.prober)
                 .await?;
             let staged: Box<dyn Staged> = Box::new(Compiled {
                 target: self.snapshot.clone(),
@@ -173,8 +209,12 @@ struct Compiled {
 }
 
 impl Staged for Compiled {
-    /// Publishes the snapshot. Requests in flight keep the one they started with.
+    /// Publishes the snapshot, and hands the TLS settings it read to the health checks.
+    /// Requests in flight keep the snapshot they started with.
     fn commit(self: Box<Self>) {
+        for upstream in self.next.upstreams.values() {
+            upstream.publish();
+        }
         self.target.store(self.next);
     }
 }
@@ -203,6 +243,11 @@ mod tests {
     /// Reads TLS files relative to the working directory.
     fn files() -> Certificates {
         Certificates::new(".")
+    }
+
+    /// Makes no probes until a test asks for health checks.
+    fn prober() -> Arc<Prober> {
+        Arc::default()
     }
 
     /// Parses a configuration, adding `version = 1` in front.
@@ -246,7 +291,7 @@ mod tests {
     #[tokio::test]
     async fn gives_each_listener_its_routes() {
         let snapshot = GatewaySnapshot::default()
-            .compile(&parse(BASE), &files())
+            .compile(&parse(BASE), &files(), &prober())
             .await
             .unwrap();
         assert!(route(&snapshot, "web", Some("example.com")).is_some());
@@ -255,7 +300,7 @@ mod tests {
 
         let everywhere = BASE.replace("listeners = [\"web\"]\n", "");
         let snapshot = GatewaySnapshot::default()
-            .compile(&parse(&everywhere), &files())
+            .compile(&parse(&everywhere), &files(), &prober())
             .await
             .unwrap();
         assert!(route(&snapshot, "api", None).is_some());
@@ -266,14 +311,17 @@ mod tests {
     #[tokio::test]
     async fn reuses_unchanged_upstreams() {
         let first = GatewaySnapshot::default()
-            .compile(&parse(BASE), &files())
+            .compile(&parse(BASE), &files(), &prober())
             .await
             .unwrap();
         let changed = BASE.replace("127.0.0.1:9002", "127.0.0.1:9003").replace(
             "targets = [\"127.0.0.1:9001\"]",
             "targets = [\"127.0.0.1:9001\"]\nretries = 0",
         );
-        let second = first.compile(&parse(&changed), &files()).await.unwrap();
+        let second = first
+            .compile(&parse(&changed), &files(), &prober())
+            .await
+            .unwrap();
         assert!(Arc::ptr_eq(
             &first.upstreams["app"].runtime,
             &second.upstreams["app"].runtime
@@ -284,7 +332,10 @@ mod tests {
             &second.upstreams["other"].runtime
         ));
         let balanced = changed.replace("retries = 0", "balance = \"least_conn\"");
-        let third = second.compile(&parse(&balanced), &files()).await.unwrap();
+        let third = second
+            .compile(&parse(&balanced), &files(), &prober())
+            .await
+            .unwrap();
         assert!(!Arc::ptr_eq(
             &second.upstreams["app"].runtime,
             &third.upstreams["app"].runtime
@@ -301,7 +352,7 @@ mod tests {
     async fn rejects_names_that_do_not_resolve() {
         let unknown = BASE.replace("127.0.0.1:9002", "unknown.invalid:9002");
         let issues = GatewaySnapshot::default()
-            .compile(&parse(&unknown), &files())
+            .compile(&parse(&unknown), &files(), &prober())
             .await
             .err()
             .unwrap();
@@ -320,7 +371,7 @@ mod tests {
              tls = { ca = \"missing-ca.pem\", cert = \"missing.crt\", key = \"missing.key\" }",
         );
         let issues = GatewaySnapshot::default()
-            .compile(&parse(&broken), &files())
+            .compile(&parse(&broken), &files(), &prober())
             .await
             .err()
             .unwrap();

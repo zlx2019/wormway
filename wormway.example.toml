@@ -84,6 +84,11 @@ balance = "round_robin"                  # default; or random, least_conn, consi
 timeouts = { connect = "10s", read = "60s", write = "60s", idle = "60s" }   # the defaults; 504 when out of time
 retries = 1                              # default; other targets tried when connecting fails,
                                          # never after the request reached a target
+# Probe every target, and new ones before they get requests; kind "tcp" only connects.
+health_check = { kind = "http", path = "/healthz", interval = "5s", timeout = "2s", healthy = 2, unhealthy = 3 }
+# Off unless set: a target whose requests fail max_fails times within fail_timeout gets none for
+# fail_timeout. passive = {} takes these defaults.
+passive = { max_fails = 1, fail_timeout = "10s" }
 
 # HTTPS to the targets, here over HTTP/2 (protocol "h1" is the default; "h2c" is HTTP/2 without
 # TLS). Certificates are checked against the system's authorities unless ca is set, for the host

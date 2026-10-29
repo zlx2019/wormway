@@ -81,6 +81,11 @@ impl PeerTls {
         })
     }
 
+    /// Returns the configured name that every target is sent, if any.
+    pub(crate) fn name(&self) -> Option<&str> {
+        self.sni.as_deref()
+    }
+
     /// Returns the name to send to `target` and check its certificate against: the configured
     /// one, the host name of the target, or its IP address, which rustls checks against the
     /// IP addresses of the certificate without sending it.

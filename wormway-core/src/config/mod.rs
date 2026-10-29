@@ -43,8 +43,8 @@ pub use settings::{
     StorageSettings,
 };
 pub use upstream::{
-    Balance, HashKey, InvalidTargetAddress, RouteTimeouts, Target, TargetAddress, Timeouts,
-    Upstream, UpstreamProtocol, UpstreamTls,
+    Balance, HashKey, HealthCheck, HealthCheckKind, InvalidTargetAddress, PassiveCheck,
+    RouteTimeouts, Target, TargetAddress, Timeouts, Upstream, UpstreamProtocol, UpstreamTls,
 };
 
 /// The configuration file, `wormway.toml`.

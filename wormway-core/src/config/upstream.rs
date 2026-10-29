@@ -40,6 +40,13 @@ pub struct Upstream {
     /// system's certificate authorities.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls: Option<UpstreamTls>,
+    /// Probe the targets at an interval and send requests only to those that pass.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health_check: Option<HealthCheck>,
+    /// Keep requests away for a while from targets whose requests fail. Off when not set;
+    /// `passive = {}` turns it on with the defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub passive: Option<PassiveCheck>,
 }
 
 impl Upstream {
@@ -115,6 +122,130 @@ impl UpstreamTls {
     /// Whether the certificates of the targets are checked.
     pub fn verify(&self) -> bool {
         self.verify.unwrap_or(true)
+    }
+}
+
+/// Active health checks: every target is probed at an interval, a target that fails gets no
+/// requests until it passes again, and a new target is probed once before it gets any.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct HealthCheck {
+    /// How a target is probed.
+    pub kind: HealthCheckKind,
+    /// Path and query of the request of `"http"`. Default: `"/"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// `Host` header of the request of `"http"`, such as `"api.internal"`. Default: `tls.sni`
+    /// if set, otherwise the host name of the target or its IP address; with the port of the
+    /// target, unless it is 80, or 443 with TLS.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    /// Statuses that pass, for `"http"`. Default: 200 to 399.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<Vec<u16>>,
+    /// Time between the probes of a target. Default: `"5s"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval: Option<Duration>,
+    /// Longest wait for a probe, from connecting to the response header. Default: `"2s"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<Duration>,
+    /// Probes in a row that an unhealthy target must pass to get requests again. Default: 2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub healthy: Option<u32>,
+    /// Probes in a row that a healthy target must fail to get no more requests. Default: 3.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unhealthy: Option<u32>,
+}
+
+impl HealthCheck {
+    /// Default of `path`.
+    pub const DEFAULT_PATH: &str = "/";
+    /// Default of `interval`.
+    pub const DEFAULT_INTERVAL: Duration = Duration::from_secs(5);
+    /// Default of `timeout`.
+    pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(2);
+    /// Default of `healthy`.
+    pub const DEFAULT_HEALTHY: u32 = 2;
+    /// Default of `unhealthy`.
+    pub const DEFAULT_UNHEALTHY: u32 = 3;
+
+    /// Returns the path in effect.
+    pub fn path(&self) -> &str {
+        self.path.as_deref().unwrap_or(Self::DEFAULT_PATH)
+    }
+
+    /// Whether `status` passes.
+    pub fn passes(&self, status: u16) -> bool {
+        match &self.status {
+            Some(statuses) => statuses.contains(&status),
+            None => (200..400).contains(&status),
+        }
+    }
+
+    /// Returns the interval in effect.
+    pub fn interval(&self) -> Duration {
+        self.interval.unwrap_or(Self::DEFAULT_INTERVAL)
+    }
+
+    /// Returns the timeout in effect.
+    pub fn timeout(&self) -> Duration {
+        self.timeout.unwrap_or(Self::DEFAULT_TIMEOUT)
+    }
+
+    /// Returns the number of passed probes in effect.
+    pub fn healthy(&self) -> u32 {
+        self.healthy.unwrap_or(Self::DEFAULT_HEALTHY)
+    }
+
+    /// Returns the number of failed probes in effect.
+    pub fn unhealthy(&self) -> u32 {
+        self.unhealthy.unwrap_or(Self::DEFAULT_UNHEALTHY)
+    }
+}
+
+/// How a health check probes a target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum HealthCheckKind {
+    /// A TCP connection, without TLS.
+    Tcp,
+    /// A `GET` request with the protocol and the TLS settings of the upstream; a status in
+    /// `status` passes.
+    Http,
+}
+
+/// Passive health checks, as in Nginx: a target whose requests fail `max_fails` times within
+/// `fail_timeout` gets no requests for `fail_timeout`. Failing means that the connection, its
+/// TLS, sending the request or waiting for the response header failed or ran out of time; a
+/// response passes whatever its status.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct PassiveCheck {
+    /// Failures within `fail_timeout` that take a target out. Default: 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_fails: Option<u32>,
+    /// Time in which the failures count, and for which the target is out. Default: `"10s"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fail_timeout: Option<Duration>,
+}
+
+impl PassiveCheck {
+    /// Default of `max_fails`.
+    pub const DEFAULT_MAX_FAILS: u32 = 1;
+    /// Default of `fail_timeout`.
+    pub const DEFAULT_FAIL_TIMEOUT: Duration = Duration::from_secs(10);
+
+    /// Returns the number of failures in effect.
+    pub fn max_fails(&self) -> u32 {
+        self.max_fails.unwrap_or(Self::DEFAULT_MAX_FAILS)
+    }
+
+    /// Returns the fail timeout in effect.
+    pub fn fail_timeout(&self) -> Duration {
+        self.fail_timeout.unwrap_or(Self::DEFAULT_FAIL_TIMEOUT)
     }
 }
 
@@ -594,6 +725,59 @@ mod tests {
         assert_eq!(plain.protocol(), UpstreamProtocol::H1);
         assert_eq!(plain.tls, Some(UpstreamTls::default()));
         assert!(toml::from_str::<Upstream>("targets = []\ntls = { crt = \"a\" }").is_err());
+    }
+
+    /// Health checks are read and written back, with their defaults when left out.
+    #[test]
+    fn reads_health_checks() {
+        let text = r#"
+            targets = ["10.0.0.1:80"]
+            health_check = { kind = "http", path = "/healthz", host = "api.internal", status = [200, 204], interval = "10s", timeout = "1s", healthy = 1, unhealthy = 5 }
+            passive = { max_fails = 3, fail_timeout = "30s" }
+        "#;
+        let upstream: Upstream = toml::from_str(text).unwrap();
+        let check = upstream.health_check.clone().unwrap();
+        assert_eq!(check.kind, HealthCheckKind::Http);
+        assert_eq!(check.path(), "/healthz");
+        assert!(check.passes(204));
+        assert!(!check.passes(301));
+        assert_eq!(check.interval(), Duration::from_secs(10));
+        assert_eq!((check.healthy(), check.unhealthy()), (1, 5));
+        let passive = upstream.passive.clone().unwrap();
+        assert_eq!(passive.max_fails(), 3);
+        assert_eq!(passive.fail_timeout(), Duration::from_secs(30));
+        let toml = toml::to_string(&upstream).unwrap();
+        assert_eq!(toml::from_str::<Upstream>(&toml).unwrap(), upstream);
+        let json = serde_json::to_string(&upstream).unwrap();
+        assert_eq!(serde_json::from_str::<Upstream>(&json).unwrap(), upstream);
+
+        let text = r#"
+            targets = ["10.0.0.1:80"]
+            health_check = { kind = "tcp" }
+            passive = {}
+        "#;
+        let plain: Upstream = toml::from_str(text).unwrap();
+        let check = plain.health_check.unwrap();
+        assert_eq!(check.path(), HealthCheck::DEFAULT_PATH);
+        assert!(check.passes(200) && check.passes(399));
+        assert!(!check.passes(199) && !check.passes(400));
+        assert_eq!(check.timeout(), HealthCheck::DEFAULT_TIMEOUT);
+        assert_eq!(check.healthy(), HealthCheck::DEFAULT_HEALTHY);
+        assert_eq!(check.unhealthy(), HealthCheck::DEFAULT_UNHEALTHY);
+        let passive = plain.passive.unwrap();
+        assert_eq!(passive.max_fails(), PassiveCheck::DEFAULT_MAX_FAILS);
+        assert_eq!(passive.fail_timeout(), PassiveCheck::DEFAULT_FAIL_TIMEOUT);
+
+        let rejected = [
+            "health_check = {}",
+            "health_check = { kind = \"grpc\" }",
+            "health_check = { kind = \"tcp\", port = 8081 }",
+            "passive = { max_fails = 1, window = \"1s\" }",
+        ];
+        for setting in rejected {
+            let text = format!("targets = []\n{setting}");
+            assert!(toml::from_str::<Upstream>(&text).is_err(), "{setting}");
+        }
     }
 
     /// Balancing, the hash key, the time limits and the retries are read and written back.

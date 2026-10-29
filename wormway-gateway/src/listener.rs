@@ -101,7 +101,7 @@ impl ServiceFactory for HttpListeners {
 }
 
 /// Returns the message of a panic payload.
-fn panic_message(payload: &(dyn Any + Send)) -> &str {
+pub(crate) fn panic_message(payload: &(dyn Any + Send)) -> &str {
     match payload.downcast_ref::<String>() {
         Some(message) => message,
         None => payload

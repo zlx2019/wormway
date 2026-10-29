@@ -10,7 +10,9 @@
 
 mod compress;
 mod headers;
+mod health;
 mod listener;
+mod probe;
 mod proxy;
 mod route;
 mod snapshot;

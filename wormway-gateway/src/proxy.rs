@@ -11,7 +11,7 @@ use pingora::http::{HMap, Method, RequestHeader, ResponseHeader};
 use pingora::lb::Backend;
 use pingora::proxy::{FailToProxy, ProxyHttp, Session};
 use pingora::upstreams::peer::HttpPeer;
-use pingora::{Error, ErrorSource, ErrorType, HTTPStatus};
+use pingora::{Error, ErrorSource, ErrorType, HTTPStatus, RetryType};
 use wormway_core::config::{HashKey, Name, Rewrite};
 use wormway_core::routing::{self, Request, RequestHeaders};
 
@@ -50,6 +50,8 @@ pub(crate) struct RequestContext {
     retries: u32,
     /// The request counted at its target, for upstreams balanced by requests in progress.
     inflight: Option<Inflight>,
+    /// Whether the current target sent its response header.
+    answered: bool,
 }
 
 impl Proxy {
@@ -99,6 +101,7 @@ impl ProxyHttp for Proxy {
             next: None,
             retries: 0,
             inflight: None,
+            answered: false,
         }
     }
 
@@ -163,14 +166,15 @@ impl ProxyHttp for Proxy {
                 .ok_or_else(|| Error::explain(HTTPStatus(503), "no target available"))?,
         };
         ctx.inflight = upstream.runtime.track(&target);
+        ctx.answered = false;
         let peer = upstream.peer(&target, &route.timeouts);
         ctx.tried.push(target);
         Ok(Box::new(peer))
     }
 
-    /// Tries another target when connecting failed, as many times as the upstream allows and
-    /// as long as there is a target the request has not tried. Nothing was sent, so this is
-    /// safe for every method.
+    /// Counts the failure for the passive health checks, then tries another target, as many
+    /// times as the upstream allows and as long as there is a target the request has not
+    /// tried. Nothing was sent, so this is safe for every method.
     fn fail_to_connect(
         &self,
         session: &mut Session,
@@ -184,6 +188,9 @@ impl ProxyHttp for Proxy {
         let Some(upstream) = route.upstream() else {
             return e;
         };
+        if let Some(target) = ctx.tried.last() {
+            upstream.runtime.failed(target, &e);
+        }
         if ctx.retries >= upstream.retries() {
             return e;
         }
@@ -203,7 +210,8 @@ impl ProxyHttp for Proxy {
 
     /// Retries over a new connection to the same target only when a reused connection turned
     /// out closed, as Pingora does: for idempotent requests whose body can be sent again, and
-    /// never once the response has started.
+    /// never once the response has started. Counts a failure of the target before its response
+    /// header for the passive health checks, unless a reused connection may just have closed.
     fn error_while_proxy(
         &self,
         peer: &HttpPeer,
@@ -213,6 +221,15 @@ impl ProxyHttp for Proxy {
         client_reused: bool,
     ) -> Box<Error> {
         let mut e = e.more_context(format!("Peer: {peer}"));
+        let stale = client_reused && e.retry == RetryType::ReusedOnly;
+        if !stale
+            && !ctx.answered
+            && *e.esource() == ErrorSource::Upstream
+            && let (Some(route), Some(target)) = (&ctx.route, ctx.tried.last())
+            && let Some(upstream) = route.upstream()
+        {
+            upstream.runtime.failed(target, &e);
+        }
         if session.response_written().is_some()
             || !session.req_header().method.is_idempotent()
             || session.as_ref().retry_buffer_truncated()
@@ -245,6 +262,19 @@ impl ProxyHttp for Proxy {
             error_code: code,
             can_reuse_downstream: false,
         }
+    }
+
+    /// Notes that the target answered, unless with an interim response.
+    async fn upstream_response_filter(
+        &self,
+        _session: &mut Session,
+        upstream_response: &mut ResponseHeader,
+        ctx: &mut RequestContext,
+    ) -> pingora::Result<()> {
+        if !upstream_response.status.is_informational() {
+            ctx.answered = true;
+        }
+        Ok(())
     }
 
     /// Tells the upstream about the client, then rewrites the path and changes the headers as

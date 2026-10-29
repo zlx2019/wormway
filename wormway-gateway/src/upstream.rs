@@ -2,10 +2,11 @@
 //! resolved again in the background, and the settings that every request to it follows.
 
 use std::collections::{BTreeSet, HashMap};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
@@ -20,6 +21,7 @@ use wormway_core::config::{
     UpstreamProtocol,
 };
 
+use crate::health::{UpstreamHealth, Watch};
 use crate::upstream_tls::PeerTls;
 
 /// How many targets a selection may look at before it gives up.
@@ -34,7 +36,8 @@ const H2_STREAMS: usize = 100;
 /// An upstream as the routes of one snapshot use it: the shared runtime and the settings of
 /// this configuration.
 pub(crate) struct CompiledUpstream {
-    /// The load balancer, shared with the snapshots whose targets and balancing are the same.
+    /// The load balancer, shared with the snapshots whose targets, balancing and health checks
+    /// are the same.
     pub(crate) runtime: Arc<UpstreamRuntime>,
     /// What consistent hashing hashes, for upstreams that balance that way.
     hash_key: Option<HashKey>,
@@ -42,26 +45,31 @@ pub(crate) struct CompiledUpstream {
     timeouts: Timeouts,
     /// How many other targets a request tries when it cannot connect.
     retries: u32,
-    /// The protocol spoken with the targets.
-    protocol: UpstreamProtocol,
-    /// TLS to the targets, if any.
-    tls: Option<PeerTls>,
+    /// How requests reach the targets.
+    connect: Arc<Connect>,
 }
 
 impl CompiledUpstream {
-    /// Puts the settings of `upstream` on `runtime`, with the TLS files read into `tls`.
+    /// Puts the settings of `upstream` on `runtime`, reaching the targets through `connect`.
     pub(crate) fn new(
         runtime: Arc<UpstreamRuntime>,
         upstream: &Upstream,
-        tls: Option<PeerTls>,
+        connect: Arc<Connect>,
     ) -> Self {
         Self {
             runtime,
             hash_key: (upstream.balance() == Balance::ConsistentHash).then(|| upstream.hash_key()),
             timeouts: upstream.timeouts,
             retries: upstream.retries(),
-            protocol: upstream.protocol(),
-            tls,
+            connect,
+        }
+    }
+
+    /// Hands the way to reach the targets to the health checks; called when the snapshot goes
+    /// into effect, so that a change that is turned down never reaches them.
+    pub(crate) fn publish(&self) {
+        if let Some(health) = self.runtime.health() {
+            health.reach(self.connect.clone());
         }
     }
 
@@ -77,6 +85,32 @@ impl CompiledUpstream {
 
     /// Returns the peer that sends a request of a route with time limits `route` to `target`.
     pub(crate) fn peer(&self, target: &Backend, route: &RouteTimeouts) -> HttpPeer {
+        let mut peer = self.connect.peer(target);
+        let options = &mut peer.options;
+        options.total_connection_timeout = Some(self.timeouts.connect().get());
+        options.read_timeout = Some(route.read.unwrap_or(self.timeouts.read()).get());
+        options.write_timeout = Some(route.write.unwrap_or(self.timeouts.write()).get());
+        options.idle_timeout = Some(self.timeouts.idle().get());
+        peer
+    }
+}
+
+/// How requests and health checks reach the targets of an upstream: the protocol and TLS.
+pub(crate) struct Connect {
+    /// The protocol spoken with the targets.
+    protocol: UpstreamProtocol,
+    /// TLS to the targets, if any.
+    tls: Option<PeerTls>,
+}
+
+impl Connect {
+    /// Reaches the targets with `protocol`, over `tls` if set.
+    pub(crate) fn new(protocol: UpstreamProtocol, tls: Option<PeerTls>) -> Self {
+        Self { protocol, tls }
+    }
+
+    /// Returns a peer that reaches `target`, without time limits.
+    pub(crate) fn peer(&self, target: &Backend) -> HttpPeer {
         let sni = self
             .tls
             .as_ref()
@@ -86,25 +120,31 @@ impl CompiledUpstream {
         if let Some(tls) = &self.tls {
             tls.configure(&mut peer);
         }
-        let options = &mut peer.options;
-        options.total_connection_timeout = Some(self.timeouts.connect().get());
-        options.read_timeout = Some(route.read.unwrap_or(self.timeouts.read()).get());
-        options.write_timeout = Some(route.write.unwrap_or(self.timeouts.write()).get());
-        options.idle_timeout = Some(self.timeouts.idle().get());
         // HTTP/2 only: over TLS through ALPN, without TLS from the first byte.
         if matches!(self.protocol, UpstreamProtocol::H2 | UpstreamProtocol::H2c) {
-            options.alpn = ALPN::H2;
-            options.max_h2_streams = H2_STREAMS;
+            peer.options.alpn = ALPN::H2;
+            peer.options.max_h2_streams = H2_STREAMS;
         }
         peer
+    }
+
+    /// Whether the targets are reached over TLS.
+    pub(crate) fn tls(&self) -> bool {
+        self.tls.is_some()
+    }
+
+    /// Returns the configured name that TLS sends to every target, if any.
+    pub(crate) fn sni(&self) -> Option<&str> {
+        self.tls.as_ref().and_then(PeerTls::name)
     }
 }
 
 /// The load balancer of an upstream and the targets it balances over.
 ///
-/// A new configuration reuses the runtime of an upstream whose targets and balancing did not
-/// change, so its state, such as the position of the round robin and the requests in progress,
-/// carries over.
+/// A new configuration reuses the runtime of an upstream whose targets, balancing and health
+/// checks did not change, so its state, such as the position of the round robin and the
+/// requests in progress, carries over. The health of the targets carries over to a new runtime
+/// as long as the health checks stay the same.
 pub(crate) struct UpstreamRuntime {
     /// The upstream, for the log.
     name: Name,
@@ -116,17 +156,31 @@ pub(crate) struct UpstreamRuntime {
     resolved: Arc<ArcSwap<BTreeSet<Backend>>>,
     /// Picks the target of each request.
     balancer: Balancer,
+    /// The targets as registered with the health of the upstream; `None` without health
+    /// checks.
+    watch: Option<Watch>,
+    /// Where the next search through every target starts, for requests without a key.
+    turn: AtomicUsize,
 }
 
 impl UpstreamRuntime {
     /// Builds the runtime of upstream `name` with `settings`, after resolving its host names.
-    /// The problems come with the index of their target. With host names, a task resolves them
+    /// With `health`, targets that were never probed are probed through `connect` first. The
+    /// problems come with the index of their target. With host names, a task resolves them
     /// again every 30 seconds until the runtime is dropped.
     pub(crate) async fn new(
         name: &Name,
         settings: &Upstream,
+        health: Option<Arc<UpstreamHealth>>,
+        connect: &Arc<Connect>,
     ) -> Result<Arc<Self>, Vec<(usize, String)>> {
-        let resolved = Arc::new(ArcSwap::from_pointee(resolve(&settings.targets).await?));
+        let targets = resolve(&settings.targets).await?;
+        let watch = health.map(|health| health.watch());
+        if let Some(watch) = &watch {
+            let unprobed = watch.update(&targets);
+            watch.health().probe(unprobed, connect.clone()).await;
+        }
+        let resolved = Arc::new(ArcSwap::from_pointee(targets));
         let backends = Backends::new(Box::new(Resolved(resolved.clone())));
         let runtime = Arc::new(Self {
             name: name.clone(),
@@ -134,6 +188,8 @@ impl UpstreamRuntime {
             balance: settings.balance(),
             resolved,
             balancer: Balancer::new(settings.balance(), backends),
+            watch,
+            turn: AtomicUsize::new(0),
         });
         // Reads the resolved targets; it does not wait for anything.
         if let Err(error) = runtime.balancer.update().await {
@@ -149,14 +205,70 @@ impl UpstreamRuntime {
         Ok(runtime)
     }
 
-    /// Whether the runtime balances over the targets of `settings` in its way.
+    /// Whether the runtime balances over the targets of `settings` in its way, and checks their
+    /// health as `settings` asks.
     pub(crate) fn serves(&self, settings: &Upstream) -> bool {
-        self.targets == settings.targets && self.balance == settings.balance()
+        let checks = match self.health() {
+            Some(health) => health.checks_as(settings),
+            None => settings.health_check.is_none() && settings.passive.is_none(),
+        };
+        self.targets == settings.targets && self.balance == settings.balance() && checks
     }
 
-    /// Picks a target that `accept` takes, for a request with consistent-hashing key `key`.
+    /// Returns the health of the targets, for upstreams with health checks.
+    pub(crate) fn health(&self) -> Option<&Arc<UpstreamHealth>> {
+        self.watch.as_ref().map(Watch::health)
+    }
+
+    /// Picks a healthy target that `accept` takes, for a request with consistent-hashing key
+    /// `key`. When only targets that the passive checks took out are left, they are picked
+    /// anyway, as in Nginx: an upstream with one target keeps it.
     pub(crate) fn select(&self, key: &[u8], accept: impl Fn(&Backend) -> bool) -> Option<Backend> {
-        self.balancer.select(key, accept)
+        let Some(health) = self.health() else {
+            return self.pick(key, &accept);
+        };
+        let now = Instant::now();
+        let usable = |target: &Backend| health.usable(&target.addr, now) && accept(target);
+        self.pick(key, &usable).or_else(|| {
+            let up = |target: &Backend| health.up(&target.addr) && accept(target);
+            health.passive().then(|| self.pick(key, &up)).flatten()
+        })
+    }
+
+    /// Counts a request to `target` that failed with `error`, for the passive checks.
+    pub(crate) fn failed(&self, target: &Backend, error: &pingora::Error) {
+        if let Some(health) = self.health() {
+            health.failed(target, error, Instant::now());
+        }
+    }
+
+    /// Picks a target that `accept` takes: one that the load balancer offers, or else the first
+    /// of all the targets. The load balancer offers a few targets only, which may all be
+    /// refused when most targets are not usable.
+    fn pick(&self, key: &[u8], accept: &dyn Fn(&Backend) -> bool) -> Option<Backend> {
+        self.balancer
+            .select(key, accept)
+            .or_else(|| self.search(key, accept))
+    }
+
+    /// Returns the first target that `accept` takes, looking at every target from a place that
+    /// `key` decides, or that moves on with every search when there is no key.
+    fn search(&self, key: &[u8], accept: &dyn Fn(&Backend) -> bool) -> Option<Backend> {
+        let targets = self.resolved.load();
+        let start = if key.is_empty() {
+            self.turn.fetch_add(1, Ordering::Relaxed)
+        } else {
+            let mut hasher = DefaultHasher::new();
+            key.hash(&mut hasher);
+            hasher.finish() as usize
+        };
+        let start = start.checked_rem(targets.len())?;
+        targets
+            .iter()
+            .skip(start)
+            .chain(targets.iter().take(start))
+            .find(|target| accept(target))
+            .cloned()
     }
 
     /// Counts a request in progress at `target` until the guard is dropped, for upstreams that
@@ -169,6 +281,7 @@ impl UpstreamRuntime {
     }
 
     /// Resolves the host names again and updates the targets; on failure the targets stay.
+    /// New addresses are probed before they get requests.
     async fn refresh(&self) {
         let backends = match resolve(&self.targets).await {
             Ok(backends) => backends,
@@ -183,6 +296,11 @@ impl UpstreamRuntime {
                 return;
             }
         };
+        if let Some(watch) = &self.watch {
+            let unprobed = watch.update(&backends);
+            let health = watch.health();
+            health.probe(unprobed, health.reaching()).await;
+        }
         self.resolved.store(Arc::new(backends));
         if let Err(error) = self.balancer.update().await {
             tracing::warn!(upstream = %self.name, "cannot update the targets: {error}");
@@ -210,7 +328,7 @@ async fn keep_resolving(runtime: Weak<UpstreamRuntime>) {
 
 /// Returns the backends of `targets`: each IP address, and each address of each host name with
 /// the weight of the name. The problems come with the index of their target.
-async fn resolve(targets: &[Target]) -> Result<BTreeSet<Backend>, Vec<(usize, String)>> {
+pub(crate) async fn resolve(targets: &[Target]) -> Result<BTreeSet<Backend>, Vec<(usize, String)>> {
     let mut backends = BTreeSet::new();
     let mut problems = Vec::new();
     for (index, target) in targets.iter().enumerate() {
@@ -490,9 +608,14 @@ mod tests {
             balance: Some(balance),
             ..Upstream::default()
         };
-        UpstreamRuntime::new(&"app".parse().unwrap(), &settings)
+        UpstreamRuntime::new(&"app".parse().unwrap(), &settings, None, &plain())
             .await
             .unwrap()
+    }
+
+    /// Reaches targets without TLS.
+    fn plain() -> Arc<Connect> {
+        Arc::new(Connect::new(UpstreamProtocol::H1, None))
     }
 
     /// The address of `target`.
@@ -537,7 +660,7 @@ mod tests {
             balance: Some(Balance::LeastConn),
             ..Upstream::default()
         };
-        let upstream = UpstreamRuntime::new(&"app".parse().unwrap(), &settings)
+        let upstream = UpstreamRuntime::new(&"app".parse().unwrap(), &settings, None, &plain())
             .await
             .unwrap();
         let mut held = Vec::new();
@@ -574,6 +697,39 @@ mod tests {
                 upstream.track(&pick).is_some(),
                 balance == Balance::LeastConn
             );
+        }
+    }
+
+    /// When the load balancer offers only refused targets, every target is looked at: the one
+    /// usable target among many is always found, and the same one for the same key.
+    #[tokio::test]
+    async fn finds_the_last_usable_target() {
+        let addresses: Vec<String> = (1..=40).map(|i| format!("10.0.0.{i}:80")).collect();
+        let addresses: Vec<&str> = addresses.iter().map(String::as_str).collect();
+        for balance in [
+            Balance::RoundRobin,
+            Balance::Random,
+            Balance::LeastConn,
+            Balance::ConsistentHash,
+        ] {
+            let upstream = runtime(&addresses, balance).await;
+            for key in 0..50 {
+                let key = format!("user-{key}");
+                let pick =
+                    upstream.select(key.as_bytes(), |target| address(target) == "10.0.0.7:80");
+                assert_eq!(
+                    pick.map(|pick| address(&pick)).as_deref(),
+                    Some("10.0.0.7:80")
+                );
+            }
+            let two = |target: &Backend| {
+                matches!(address(target).as_str(), "10.0.0.7:80" | "10.0.0.9:80")
+            };
+            let first = address(&upstream.select(b"key", two).unwrap());
+            let again = address(&upstream.select(b"key", two).unwrap());
+            if balance == Balance::ConsistentHash {
+                assert_eq!(first, again);
+            }
         }
     }
 

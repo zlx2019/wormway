@@ -13,7 +13,7 @@ async-trait.workspace = true
 http.workspace = true
 pingora.workspace = true
 rustls.workspace = true
-tokio = { workspace = true, features = ["io-util", "net", "time"] }
+tokio = { workspace = true, features = ["io-util", "net", "rt", "time"] }
 tracing.workspace = true
 wormway-core.workspace = true
 wormway-runtime.workspace = true

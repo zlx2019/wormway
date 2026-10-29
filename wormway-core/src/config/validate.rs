@@ -1,13 +1,13 @@
 //! Rules that span fields. Each check appends to a list, so one run reports every problem.
 
 use std::collections::HashSet;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use super::http::is_token;
 use super::upstream::is_host_name;
 use super::{
-    Balance, Config, ConfigSource, Duration, HashKey, HeaderName, HeaderRules, Issue, Name,
-    PathPattern, Redirect, Route, Target, Upstream, UpstreamProtocol,
+    Balance, Config, ConfigSource, Duration, HashKey, HeaderName, HeaderRules, HealthCheckKind,
+    Issue, Name, PathPattern, Redirect, Route, Target, Upstream, UpstreamProtocol,
 };
 use crate::routing::normalize_path;
 
@@ -359,7 +359,102 @@ fn check_upstreams(config: &Config, issues: &mut Vec<Issue>) {
             ));
         }
         check_upstream_tls(name, upstream, issues);
+        check_health(name, upstream, issues);
     }
+}
+
+/// The health checks have sound settings, and those of `"http"` come only with it.
+fn check_health(name: &Name, upstream: &Upstream, issues: &mut Vec<Issue>) {
+    if let Some(check) = &upstream.health_check {
+        let at = format!("upstreams.{name}.health_check");
+        if check.kind != HealthCheckKind::Http {
+            let http_only = [
+                ("path", check.path.is_some()),
+                ("host", check.host.is_some()),
+                ("status", check.status.is_some()),
+            ];
+            for (field, _) in http_only.into_iter().filter(|(_, set)| *set) {
+                issues.push(Issue::new(
+                    format!("{at}.{field}"),
+                    "only for kind = \"http\"",
+                ));
+            }
+        }
+        if let Some(path) = &check.path
+            && !is_request_path(path)
+        {
+            issues.push(Issue::new(
+                format!("{at}.path"),
+                "must start with \"/\" and hold only visible ASCII characters other than \"#\"",
+            ));
+        }
+        if let Some(host) = &check.host
+            && !is_authority(host)
+        {
+            issues.push(Issue::new(
+                format!("{at}.host"),
+                "must be a host name or an IP address, with an optional port",
+            ));
+        }
+        if let Some(statuses) = &check.status {
+            if statuses.is_empty() {
+                issues.push(Issue::new(
+                    format!("{at}.status"),
+                    "must list at least one status",
+                ));
+            }
+            for (i, status) in statuses.iter().enumerate() {
+                if !(100..=599).contains(status) {
+                    issues.push(Issue::new(
+                        format!("{at}.status[{i}]"),
+                        "must be between 100 and 599",
+                    ));
+                }
+            }
+        }
+        check_timeouts(
+            &at,
+            [("interval", check.interval), ("timeout", check.timeout)],
+            issues,
+        );
+        for (field, count) in [("healthy", check.healthy), ("unhealthy", check.unhealthy)] {
+            if count == Some(0) {
+                issues.push(Issue::new(format!("{at}.{field}"), "must be at least 1"));
+            }
+        }
+    }
+    if let Some(passive) = &upstream.passive {
+        let at = format!("upstreams.{name}.passive");
+        if passive.max_fails == Some(0) {
+            issues.push(Issue::new(format!("{at}.max_fails"), "must be at least 1"));
+        }
+        check_timeouts(&at, [("fail_timeout", passive.fail_timeout)], issues);
+    }
+}
+
+/// Whether `path` can be sent as the target of a request: it starts with "/" and holds visible
+/// ASCII characters other than "#", which would start a fragment.
+fn is_request_path(path: &str) -> bool {
+    path.starts_with('/') && path.bytes().all(|b| b.is_ascii_graphic() && b != b'#')
+}
+
+/// Whether `authority` fits a `Host` header: a host name or an IP address, IPv6 in brackets,
+/// with an optional port.
+fn is_authority(authority: &str) -> bool {
+    let host = match authority.rsplit_once(':') {
+        // The colons of a bracketed IPv6 address without a port are not a port.
+        Some((host, port)) if !port.contains(']') => {
+            if port.parse::<u16>().is_err() {
+                return false;
+            }
+            host
+        }
+        _ => authority,
+    };
+    if let Some(ip) = host.strip_prefix('[').and_then(|ip| ip.strip_suffix(']')) {
+        return ip.parse::<Ipv6Addr>().is_ok();
+    }
+    is_host_name(host) || host.parse::<Ipv4Addr>().is_ok()
 }
 
 /// The protocol fits the TLS setting, and the TLS settings are complete and used.
@@ -761,6 +856,80 @@ mod tests {
         );
         assert_eq!(issues[3].message, "set cert and key together");
         assert_eq!(issues[4].message, "h2 needs tls; h2c is HTTP/2 without TLS");
+    }
+
+    /// Health checks have sound settings, the request settings only with "http", and passive
+    /// checks count at least one failure for some time.
+    #[test]
+    fn checks_health_checks() {
+        let config = parse(
+            r#"
+            version = 1
+            [upstreams.tcp]
+            targets = ["10.0.0.1:80"]
+            health_check = { kind = "tcp", path = "/", status = [200], interval = "0s", healthy = 0 }
+            passive = { max_fails = 0, fail_timeout = "0s" }
+            [upstreams.http]
+            targets = ["10.0.0.1:80"]
+            health_check = { kind = "http", path = "health", host = "::1", status = [200, 99, 600] }
+            [upstreams.empty]
+            targets = ["10.0.0.1:80"]
+            health_check = { kind = "http", path = "/a#b", host = "api:", status = [] }
+            [upstreams.fine]
+            targets = ["10.0.0.1:80"]
+            health_check = { kind = "http", path = "/healthz?full=1", host = "[::1]:8080", status = [204], unhealthy = 1 }
+            passive = {}
+            "#,
+        );
+        let issues = errors(&config);
+        assert_eq!(
+            paths(&issues),
+            [
+                "upstreams.empty.health_check.path",
+                "upstreams.empty.health_check.host",
+                "upstreams.empty.health_check.status",
+                "upstreams.http.health_check.path",
+                "upstreams.http.health_check.host",
+                "upstreams.http.health_check.status[1]",
+                "upstreams.http.health_check.status[2]",
+                "upstreams.tcp.health_check.path",
+                "upstreams.tcp.health_check.status",
+                "upstreams.tcp.health_check.interval",
+                "upstreams.tcp.health_check.healthy",
+                "upstreams.tcp.passive.max_fails",
+                "upstreams.tcp.passive.fail_timeout",
+            ]
+        );
+        assert_eq!(issues[2].message, "must list at least one status");
+        assert_eq!(issues[5].message, "must be between 100 and 599");
+        assert_eq!(issues[7].message, "only for kind = \"http\"");
+        assert_eq!(issues[10].message, "must be at least 1");
+    }
+
+    /// Host headers take host names and IP addresses, IPv6 in brackets, with optional ports.
+    #[test]
+    fn recognizes_host_headers() {
+        for host in [
+            "api.internal",
+            "api.internal:8080",
+            "10.0.0.1",
+            "10.0.0.1:80",
+            "[::1]",
+            "[::1]:8080",
+        ] {
+            assert!(is_authority(host), "{host}");
+        }
+        for host in [
+            "",
+            "::1",
+            "api internal",
+            "api:http",
+            "http://api",
+            "[api]",
+            "10.0.0.1:70000",
+        ] {
+            assert!(!is_authority(host), "{host}");
+        }
     }
 
     /// h2c is for listeners without TLS only.
