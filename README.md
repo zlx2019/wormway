@@ -23,7 +23,7 @@ Out of scope for now: end-user proxy clients (TUN, system proxy, client-side rul
 
 | Path | Content |
 |---|---|
-| `zora-*/` | Library crates, one directory each: `zora-core` (configuration model), `zora-runtime` (listeners, configuration reloads and graceful shutdown) and `zora-control` (SQLite storage with configuration versions, the Admin API, Prometheus metrics and the dashboard). |
+| `zora-*/` | Library crates, one directory each: `zora-core` (configuration model and route matching), `zora-runtime` (listeners, configuration reloads and graceful shutdown), `zora-gateway` (the HTTP gateway on Pingora: routes and load-balanced upstreams) and `zora-control` (SQLite storage with configuration versions, the Admin API, Prometheus metrics and the dashboard). |
 | `apps/zora/` | The `zora` binary: `zora run`, `zora check` (validate a configuration file), `zora schema`, and `zora config export` and `zora config apply` (the dynamic settings of a running zora, through its Admin API). No protocol is built in yet, so `zora run` only accepts configurations without listeners. |
 | `ui/` | The dashboard (React and TypeScript). zora serves it under `/ui/` on the Admin API address, `http://127.0.0.1:9872/ui/` by default, and asks for the Admin API token. |
 | `benches/` | How performance is measured: the method, and scripts for open-loop load tests and for recording the test environment. |

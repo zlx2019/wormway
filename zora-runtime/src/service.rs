@@ -1,5 +1,5 @@
 //! How protocols plug in: a factory builds one service per listener, and the service serves the
-//! connections that listener accepts.
+//! connections that listener accepts. Engines build the state that the services share.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -11,8 +11,10 @@ use tokio::net::TcpStream;
 use tokio::sync::watch;
 use zora_core::config::{Listener, Name, Protocol};
 
-/// A boxed future, as returned by [`Service`] methods.
-pub type BoxFuture<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
+use crate::engine::Engine;
+
+/// A boxed future, as returned by [`Service`] and [`Engine`] methods.
+pub type BoxFuture<'a, T = ()> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// Error type of [`ServiceFactory::create`].
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -52,11 +54,14 @@ pub trait ServiceFactory: Send + Sync + 'static {
     fn create(&self, name: &Name, listener: &Listener) -> Result<Arc<dyn Service>, BoxError>;
 }
 
-/// Service factories by protocol. A listener whose protocol has no factory is rejected.
+/// Service factories by protocol, and the engines that build their shared state. A listener
+/// whose protocol has no factory is rejected.
 #[derive(Default)]
 pub struct Services {
     /// The factory of each available protocol.
     factories: HashMap<Protocol, Arc<dyn ServiceFactory>>,
+    /// Engines in the order they were added, which is the order they prepare and commit in.
+    engines: Vec<Arc<dyn Engine>>,
 }
 
 impl Services {
@@ -70,8 +75,18 @@ impl Services {
         self.factories.insert(protocol, Arc::new(factory));
     }
 
+    /// Adds an engine. Engines prepare and commit in the order they were added.
+    pub fn add_engine(&mut self, engine: impl Engine) {
+        self.engines.push(Arc::new(engine));
+    }
+
     /// Returns the factory of `protocol`.
     pub(crate) fn get(&self, protocol: Protocol) -> Option<&Arc<dyn ServiceFactory>> {
         self.factories.get(&protocol)
+    }
+
+    /// Returns the engines in the order they were added.
+    pub(crate) fn engines(&self) -> &[Arc<dyn Engine>] {
+        &self.engines
     }
 }

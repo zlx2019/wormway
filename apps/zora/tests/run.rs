@@ -1,9 +1,9 @@
-//! End-to-end tests of `zora run`: startup, the Admin API, reload on SIGHUP and shutdown on
-//! SIGINT or SIGTERM; and of the `zora config` commands against a running zora.
+//! End-to-end tests of `zora run`: startup, the gateway, the Admin API, reload on SIGHUP and
+//! shutdown on SIGINT or SIGTERM; and of the `zora config` commands against a running zora.
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpStream;
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
@@ -27,6 +27,29 @@ fn temp_config(name: &str, text: &str) -> PathBuf {
     let path = dir.join("zora.toml");
     std::fs::write(&path, text).expect("write the test configuration");
     path
+}
+
+/// Starts an HTTP server on a free loopback port that answers every request with `body`, and
+/// returns its address.
+fn upstream(body: &'static str) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind the upstream");
+    let addr = listener.local_addr().expect("upstream address");
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().map_while(Result::ok) {
+            // Skip the request head, then answer and close.
+            let mut request = BufReader::new(stream.try_clone().expect("clone the stream"));
+            let mut line = String::new();
+            while request.read_line(&mut line).is_ok_and(|read| read > 2) {
+                line.clear();
+            }
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    addr
 }
 
 /// Sends `GET path` with an optional token to the Admin API at `addr`, and returns the status
@@ -147,6 +170,14 @@ impl Zora {
         }
     }
 
+    /// Waits until listener `name` listens and returns its first address.
+    fn listener_addr(&mut self, name: &str) -> String {
+        let line = self.wait_for(&format!("listening listener={name}"));
+        line.split_once("addr=")
+            .map(|(_, addr)| addr.trim().to_owned())
+            .expect("address in the log line")
+    }
+
     /// Waits until the Admin API listens and returns its address.
     fn admin_addr(&mut self) -> String {
         let line = self.wait_for("Admin API listening");
@@ -218,12 +249,42 @@ fn reloads_on_sighup() {
     assert_eq!(zora.exit_code(), Some(0));
 }
 
-/// A listener whose protocol is not built in stops startup with an error.
+/// The gateway forwards the requests of an HTTP listener to the upstream of their route.
 #[test]
-fn rejects_unavailable_protocols() {
-    let listener = "[listeners.web]\nlisten = [\"127.0.0.1:0\"]\nprotocol = \"http\"\n";
-    let mut zora = Zora::start(&temp_config("run-http", &format!("{EMPTY}{listener}")));
-    zora.wait_for("listener web: protocol http is not available in this build");
+fn proxies_http_requests() {
+    let target = upstream("hello from the upstream");
+    let config = format!(
+        "{EMPTY}[listeners.web]\nlisten = [\"127.0.0.1:0\"]\nprotocol = \"http\"\n[routes.all]\nupstream = \"app\"\n[upstreams.app]\ntargets = [\"{target}\"]\n"
+    );
+    let mut zora = Zora::start(&temp_config("run-proxy", &config));
+    let addr = zora.listener_addr("web");
+    zora.wait_for("zora is ready");
+
+    assert_eq!(
+        get(&addr, "/", None),
+        (200, "hello from the upstream".to_owned())
+    );
+    zora.signal("TERM");
+    assert_eq!(zora.exit_code(), Some(0));
+}
+
+/// When Pingora cannot load the system root certificates, the listener fails with the reason
+/// instead of crashing the process.
+#[test]
+fn reports_unreadable_root_certificates() {
+    let target = upstream("unused");
+    let config = format!(
+        "{EMPTY}[listeners.web]\nlisten = [\"127.0.0.1:0\"]\nprotocol = \"http\"\n[routes.all]\nupstream = \"app\"\n[upstreams.app]\ntargets = [\"{target}\"]\n"
+    );
+    let path = temp_config("run-root-certificates", &config);
+    let missing = path.with_file_name("missing-ca.pem");
+    let mut zora = Zora::start_with_env(
+        &path,
+        &[("SSL_CERT_FILE", missing.to_str().expect("UTF-8"))],
+    );
+    zora.wait_for("Error: listener web: cannot create the service");
+    let cause = zora.wait_for("cannot load the system root certificates");
+    assert!(cause.contains("could not load certs from file"), "{cause}");
     assert_eq!(zora.exit_code(), Some(1));
 }
 
@@ -336,13 +397,12 @@ fn reports_problems_with_applied_settings() {
         "{err}"
     );
 
-    let listener = "[listeners.web]\nlisten = [\"127.0.0.1:0\"]\nprotocol = \"http\"\n";
-    std::fs::write(&file, format!("version = 1\n{listener}")).expect("write");
+    std::fs::write(&file, "version = 1\n[routes.web]\nupstream = \"missing\"\n").expect("write");
     let (code, _, err) = zora_config(&path, "cli-token", &["apply", "-f", file_arg]);
     assert_eq!(code, Some(1));
     assert!(
         err.contains(&format!(
-            "{file_name}: error: listeners.web.protocol: protocol http is not available"
+            "{file_name}: error: routes.web.upstream: unknown upstream \"missing\""
         )),
         "{err}"
     );

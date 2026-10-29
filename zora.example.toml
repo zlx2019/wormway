@@ -30,11 +30,22 @@ source = "file"             # db (default): dynamic settings live in the databas
 [listeners.web]
 listen = ["0.0.0.0:8080"]
 protocol = "http"
+http = { keepalive_timeout = "75s" }    # the default; "0s" turns keep-alive off
 
 [listeners.websecure]
 listen = ["0.0.0.0:8443"]
 protocol = "http"
 tls = { certificates = ["example"] }
+
+# Requests go to the most specific matching route: exact host, then wildcard host, then any
+# host; within those, the longest path prefix.
+[routes.app]
+listeners = ["web"]                      # default: every HTTP listener
+match = { hosts = ["app.example.com", "*.app.example.com"], paths = ["/"] }
+upstream = "app"
+
+[upstreams.app]
+targets = ["127.0.0.1:3000", { address = "127.0.0.1:3001", weight = 2 }]
 
 [certificates.example]
 cert = "certs/example.crt"

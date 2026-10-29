@@ -11,6 +11,7 @@ publish.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 reqwest.workspace = true
+rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync"] }
@@ -18,6 +19,7 @@ tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 zora-control = { workspace = true, features = ["ui"] }
 zora-core = { workspace = true, features = ["schema"] }
+zora-gateway.workspace = true
 zora-runtime.workspace = true
 
 [lints]

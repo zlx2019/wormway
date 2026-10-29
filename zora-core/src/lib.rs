@@ -6,3 +6,4 @@
 //! - `schema`: JSON Schema generation for the configuration file.
 
 pub mod config;
+pub mod routing;

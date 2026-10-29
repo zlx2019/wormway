@@ -13,6 +13,7 @@ use tokio::sync::{Mutex, MutexGuard};
 use tokio_util::task::TaskTracker;
 use zora_core::config::{Config, ConfigError, Listener, Name, Protocol};
 
+use crate::engine::Staged;
 use crate::host::Host;
 use crate::service::{BoxError, ServiceFactory, Services};
 use crate::snapshot::Snapshot;
@@ -24,7 +25,7 @@ use crate::telemetry;
 pub struct Server {
     /// Runtime that accepts and serves the connections.
     handle: Handle,
-    /// Service factories by protocol.
+    /// Service factories by protocol, and the engines.
     services: Services,
     /// How long connections may take to finish when their service drains.
     shutdown_timeout: Duration,
@@ -89,7 +90,8 @@ impl Server {
     }
 
     /// Checks that `config` could be applied: its validation rules hold and every protocol it
-    /// uses is available. Addresses are not bound, so binding can still fail later.
+    /// uses is available. Engines are not prepared and addresses are not bound, so both can
+    /// still fail later.
     pub fn validate(&self, config: &Config) -> Result<(), ApplyError> {
         config.validate().map_err(ConfigError::Invalid)?;
         for (name, listener) in &config.listeners {
@@ -98,8 +100,8 @@ impl Server {
         Ok(())
     }
 
-    /// Prepares the switch to `config`: validates it, builds the services of new and changed
-    /// listeners and binds the new addresses. Nothing running changes before
+    /// Prepares the switch to `config`: validates it, prepares every engine, builds the services
+    /// of new and changed listeners and binds the new addresses. Nothing running changes before
     /// [`Prepared::commit`], and dropping the result discards it. Other changes wait until
     /// then.
     pub async fn prepare(&self, config: Config) -> Result<Prepared<'_>, ApplyError> {
@@ -168,13 +170,33 @@ impl Server {
         if state.closed {
             return Err(ApplyError::ShuttingDown);
         }
+        let staged = self.prepare_engines(&config).await?;
         let plan = self.plan(&state, &config.listeners)?;
         Ok(Prepared {
             server: self,
             state,
+            staged,
             plan,
             config,
         })
+    }
+
+    /// Prepares every engine for `config`, in order. The problems of all of them are reported
+    /// together.
+    async fn prepare_engines(&self, config: &Config) -> Result<Vec<Box<dyn Staged>>, ApplyError> {
+        let mut staged = Vec::with_capacity(self.services.engines().len());
+        let mut issues = Vec::new();
+        for engine in self.services.engines() {
+            match engine.prepare(config).await {
+                Ok(state) => staged.push(state),
+                Err(problems) => issues.extend(problems),
+            }
+        }
+        if issues.is_empty() {
+            Ok(staged)
+        } else {
+            Err(ConfigError::Invalid(issues).into())
+        }
     }
 
     /// Builds the services and binds the sockets that `listeners` needs. Running listeners are
@@ -320,6 +342,8 @@ pub struct Prepared<'a> {
     server: &'a Server,
     /// Keeps other changes out until this one is committed or dropped.
     state: MutexGuard<'a, State>,
+    /// State of every engine, in the order of the engines.
+    staged: Vec<Box<dyn Staged>>,
     /// What to change.
     plan: Plan,
     /// The configuration to switch to.
@@ -328,13 +352,19 @@ pub struct Prepared<'a> {
 
 impl Prepared<'_> {
     /// Switches to the configuration and returns its snapshot. It cannot fail.
+    ///
+    /// Engines commit first, so that new listeners find their state when they start accepting.
     pub fn commit(self) -> Arc<Snapshot> {
         let Self {
             server,
             mut state,
+            staged,
             plan,
             config,
         } = self;
+        for engine in staged {
+            engine.commit();
+        }
         let snapshot = Arc::new(Snapshot {
             version: server.snapshot.load().version + 1,
             config,

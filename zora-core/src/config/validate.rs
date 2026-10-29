@@ -1,14 +1,17 @@
 //! Rules that span fields. Each check appends to a list, so one run reports every problem.
 
+use std::collections::HashSet;
 use std::net::SocketAddr;
 
-use super::{Config, ConfigSource, Issue};
+use super::{Config, ConfigSource, Issue, Target};
 
 /// Returns every rule violation in `config`.
 pub(super) fn errors(config: &Config) -> Vec<Issue> {
     let mut issues = Vec::new();
     check_listeners(config, &mut issues);
     check_address_conflicts(config, &mut issues);
+    check_routes(config, &mut issues);
+    check_upstreams(config, &mut issues);
     issues
 }
 
@@ -19,6 +22,8 @@ pub(super) fn warnings(config: &Config) -> Vec<Issue> {
     }
     let tables = [
         ("listeners", config.listeners.is_empty()),
+        ("routes", config.routes.is_empty()),
+        ("upstreams", config.upstreams.is_empty()),
         ("certificates", config.certificates.is_empty()),
     ];
     tables
@@ -74,6 +79,61 @@ fn check_address_conflicts(config: &Config, issues: &mut Vec<Issue>) {
                 ));
             }
             claimed.push((path, *addr));
+        }
+    }
+}
+
+/// Each route names existing listeners and an existing upstream, and its paths are absolute.
+fn check_routes(config: &Config, issues: &mut Vec<Issue>) {
+    for (name, route) in &config.routes {
+        for (i, listener) in route.listeners.iter().enumerate() {
+            if !config.listeners.contains_key(listener) {
+                issues.push(Issue::new(
+                    format!("routes.{name}.listeners[{i}]"),
+                    format!("unknown listener \"{listener}\""),
+                ));
+            }
+        }
+        for (i, path) in route.r#match.paths.iter().enumerate() {
+            if !path.starts_with('/') {
+                issues.push(Issue::new(
+                    format!("routes.{name}.match.paths[{i}]"),
+                    "must start with \"/\"",
+                ));
+            }
+        }
+        if !config.upstreams.contains_key(&route.upstream) {
+            issues.push(Issue::new(
+                format!("routes.{name}.upstream"),
+                format!("unknown upstream \"{}\"", route.upstream),
+            ));
+        }
+    }
+}
+
+/// Each upstream has targets, each listed once and with a weight in range.
+fn check_upstreams(config: &Config, issues: &mut Vec<Issue>) {
+    for (name, upstream) in &config.upstreams {
+        if upstream.targets.is_empty() {
+            issues.push(Issue::new(
+                format!("upstreams.{name}.targets"),
+                "must list at least one target",
+            ));
+        }
+        let mut seen = HashSet::new();
+        for (i, target) in upstream.targets.iter().enumerate() {
+            if !seen.insert(target.address) {
+                issues.push(Issue::new(
+                    format!("upstreams.{name}.targets[{i}]"),
+                    format!("{} is listed twice", target.address),
+                ));
+            }
+            if !(1..=Target::MAX_WEIGHT).contains(&target.weight) {
+                issues.push(Issue::new(
+                    format!("upstreams.{name}.targets[{i}].weight"),
+                    format!("must be between 1 and {}", Target::MAX_WEIGHT),
+                ));
+            }
         }
     }
 }
@@ -164,6 +224,46 @@ mod tests {
         assert_eq!(paths(&errors(&config)), ["listeners.web.listen[1]"]);
     }
 
+    /// Routes must point at existing listeners and upstreams, and upstreams need sound targets.
+    #[test]
+    fn checks_routes_and_upstreams() {
+        let config = parse(
+            r#"
+            version = 1
+            [listeners.web]
+            listen = ["127.0.0.1:8080"]
+            protocol = "http"
+            [routes.api]
+            listeners = ["web", "missing"]
+            match = { paths = ["/api/", "api/"] }
+            upstream = "nowhere"
+            [routes.site]
+            upstream = "empty"
+            [upstreams.empty]
+            targets = []
+            [upstreams.app]
+            targets = ["10.0.0.1:80", { address = "10.0.0.1:80", weight = 2 }, { address = "10.0.0.2:80", weight = 0 }, { address = "10.0.0.3:80", weight = 257 }]
+            "#,
+        );
+        let issues = errors(&config);
+        assert_eq!(
+            paths(&issues),
+            [
+                "routes.api.listeners[1]",
+                "routes.api.match.paths[1]",
+                "routes.api.upstream",
+                "upstreams.app.targets[1]",
+                "upstreams.app.targets[2].weight",
+                "upstreams.app.targets[3].weight",
+                "upstreams.empty.targets",
+            ]
+        );
+        assert_eq!(issues[0].message, "unknown listener \"missing\"");
+        assert_eq!(issues[2].message, "unknown upstream \"nowhere\"");
+        assert_eq!(issues[3].message, "10.0.0.1:80 is listed twice");
+        assert_eq!(issues[4].message, "must be between 1 and 256");
+    }
+
     /// Dynamic tables in the file are flagged in db mode and used silently in file mode.
     #[test]
     fn warns_about_ignored_dynamic_settings() {
@@ -172,8 +272,15 @@ mod tests {
             [listeners.web]
             listen = ["0.0.0.0:8080"]
             protocol = "http"
+            [routes.all]
+            upstream = "app"
+            [upstreams.app]
+            targets = ["127.0.0.1:9000"]
             "#;
-        assert_eq!(paths(&warnings(&parse(text))), ["listeners"]);
+        assert_eq!(
+            paths(&warnings(&parse(text))),
+            ["listeners", "routes", "upstreams"]
+        );
 
         let file_mode = format!("{text}\n[config]\nsource = \"file\"\n");
         assert!(warnings(&parse(&file_mode)).is_empty());

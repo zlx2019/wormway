@@ -13,6 +13,7 @@ use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 use zora_control::{Admin, AdminToken, Metrics, Store};
 use zora_core::config::{AdminSettings, Config, ConfigError, ConfigSource, DynamicConfig};
+use zora_gateway::Gateway;
 use zora_runtime::{Server, Services};
 
 use crate::signals::{Signal, Signals};
@@ -98,10 +99,12 @@ fn data_plane(threads: usize) -> std::io::Result<Runtime> {
     builder.build()
 }
 
-/// Service factories of the protocols built into this binary. None yet, so every listener is
-/// rejected.
-fn services() -> Services {
-    Services::new()
+/// Service factories and engines of the protocols built into this binary: the HTTP gateway.
+/// `threads` is the number of data-plane workers.
+fn services(threads: usize) -> Services {
+    let mut services = Services::new();
+    Gateway::new(threads).register(&mut services);
+    services
 }
 
 /// Serves until a shutdown signal. A second shutdown signal closes open connections at once.
@@ -123,7 +126,8 @@ async fn serve(setup: Setup, data_plane: Handle) -> anyhow::Result<ExitCode> {
     if config.config.source == ConfigSource::Db {
         config.set_dynamic(saved_dynamic(&store).await?);
     }
-    let server = Arc::new(Server::start(data_plane, services(), config).await?);
+    let threads = data_plane.metrics().num_workers();
+    let server = Arc::new(Server::start(data_plane, services(threads), config).await?);
     let admin = Admin::new(server.clone(), store.clone(), token, metrics).await?;
     let listener = TcpListener::bind(admin_addr)
         .await

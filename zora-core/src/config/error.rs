@@ -87,7 +87,7 @@ pub struct Issue {
 
 impl Issue {
     /// Creates an issue for the setting at `path`.
-    pub(crate) fn new(path: impl Into<String>, message: impl Into<String>) -> Self {
+    pub fn new(path: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             path: path.into(),
             message: message.into(),

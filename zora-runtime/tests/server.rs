@@ -1,18 +1,18 @@
-//! Integration tests of `Server` with a line echo service.
+//! Integration tests of `Server` with a line echo service and an engine that records its calls.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::runtime::Handle;
-use zora_core::config::{Config, Listener, Name, Protocol};
+use zora_core::config::{Config, ConfigError, Issue, Listener, Name, Protocol};
 use zora_runtime::{
-    ApplyError, BoxError, BoxFuture, Connection, Server, Service, ServiceFactory, Services,
-    Shutdown,
+    ApplyError, BoxError, BoxFuture, Connection, Engine, Server, Service, ServiceFactory, Services,
+    Shutdown, Staged,
 };
 
 /// Answers every line with `<generation> <draining> <line>`. It ignores the shutdown signal, so
@@ -53,6 +53,66 @@ impl ServiceFactory for EchoFactory {
     }
 }
 
+/// Logs the listener names of every configuration it prepares and commits. It refuses
+/// configurations with a listener named `refused`.
+#[derive(Clone, Default)]
+struct Recorder {
+    /// `prepare <names>` and `commit <names>` lines, in call order.
+    log: Arc<Mutex<Vec<String>>>,
+}
+
+impl Recorder {
+    /// Returns the lines logged so far.
+    fn lines(&self) -> Vec<String> {
+        self.log.lock().expect("log").clone()
+    }
+
+    /// Appends a line.
+    fn record(&self, line: String) {
+        self.log.lock().expect("log").push(line);
+    }
+}
+
+impl Engine for Recorder {
+    /// Logs the listener names, or refuses the configuration.
+    fn prepare<'a>(
+        &'a self,
+        config: &'a Config,
+    ) -> BoxFuture<'a, Result<Box<dyn Staged>, Vec<Issue>>> {
+        Box::pin(async move {
+            if config.listeners.contains_key("refused") {
+                return Err(vec![Issue {
+                    path: "listeners.refused".to_owned(),
+                    message: "refused by the recorder".to_owned(),
+                }]);
+            }
+            let names: Vec<&str> = config.listeners.keys().map(Name::as_str).collect();
+            let names = names.join(",");
+            self.record(format!("prepare {names}"));
+            let staged: Box<dyn Staged> = Box::new(Recorded {
+                recorder: self.clone(),
+                names,
+            });
+            Ok(staged)
+        })
+    }
+}
+
+/// What the recorder prepared.
+struct Recorded {
+    /// Where to log the commit.
+    recorder: Recorder,
+    /// Listener names of the configuration.
+    names: String,
+}
+
+impl Staged for Recorded {
+    /// Logs the commit.
+    fn commit(self: Box<Self>) {
+        self.recorder.record(format!("commit {}", self.names));
+    }
+}
+
 /// A listener on any free loopback port.
 const WEB: &str = "[listeners.web]\nlisten = [\"127.0.0.1:0\"]\nprotocol = \"http\"\n";
 /// A second listener on any free loopback port.
@@ -72,6 +132,17 @@ async fn start(text: &str) -> (Server, Arc<AtomicUsize>) {
     services.register(Protocol::Http, factory);
     match Server::start(Handle::current(), services, parse(text)).await {
         Ok(server) => (server, created),
+        Err(error) => panic!("cannot start: {error}"),
+    }
+}
+
+/// Starts a server like [`start`], with `recorder` as its engine.
+async fn start_recorded(text: &str, recorder: &Recorder) -> Server {
+    let mut services = Services::new();
+    services.register(Protocol::Http, EchoFactory::default());
+    services.add_engine(recorder.clone());
+    match Server::start(Handle::current(), services, parse(text)).await {
+        Ok(server) => server,
         Err(error) => panic!("cannot start: {error}"),
     }
 }
@@ -347,5 +418,53 @@ async fn shutdown_ends_with_the_last_connection() {
         started.elapsed() < Duration::from_secs(2),
         "took {:?}",
         started.elapsed()
+    );
+}
+
+/// Engines prepare and commit with the start and with every change.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn commits_engines_with_each_change() {
+    let recorder = Recorder::default();
+    let server = start_recorded(WEB, &recorder).await;
+    server
+        .apply(parse(&format!("{WEB}{API}")))
+        .await
+        .expect("apply");
+    assert_eq!(
+        recorder.lines(),
+        [
+            "prepare web",
+            "commit web",
+            "prepare api,web",
+            "commit api,web"
+        ]
+    );
+}
+
+/// A problem found by an engine rejects the change with the path of its setting, and a dropped
+/// preparation is never committed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn engines_can_reject_changes() {
+    let recorder = Recorder::default();
+    let server = start_recorded(WEB, &recorder).await;
+    let refused = "[listeners.refused]\nlisten = [\"127.0.0.1:0\"]\nprotocol = \"http\"\n";
+    match server.apply(parse(&format!("{WEB}{refused}"))).await {
+        Err(ApplyError::Config(ConfigError::Invalid(issues))) => {
+            assert_eq!(issues.len(), 1);
+            assert_eq!(issues[0].path, "listeners.refused");
+        }
+        other => panic!("expected the engine to refuse, got {other:?}"),
+    }
+    assert_eq!(server.listeners().await.len(), 1);
+    assert_eq!(server.snapshot().version, 1);
+
+    let prepared = server
+        .prepare(parse(&format!("{WEB}{API}")))
+        .await
+        .expect("prepare");
+    drop(prepared);
+    assert_eq!(
+        recorder.lines(),
+        ["prepare web", "commit web", "prepare api,web"]
     );
 }

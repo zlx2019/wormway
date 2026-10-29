@@ -69,10 +69,33 @@
         }
       ]
     },
+    "HttpSettings": {
+      "additionalProperties": false,
+      "description": "HTTP settings of a listener. Settings left out follow the defaults of the running zora.",
+      "properties": {
+        "keepalive_timeout": {
+          "description": "How long a kept-alive HTTP/1.1 connection, or an idle HTTP/2 connection, may wait for its\nnext request before it is closed, rounded up to whole seconds. `\"0s\"` turns HTTP/1.1\nkeep-alive off and closes idle HTTP/2 connections after one second. Default: `\"75s\"`, as\nin Nginx.",
+          "pattern": "^([0-9]+(ms|s|m|h|d))+$",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "Listener": {
       "additionalProperties": false,
       "description": "A set of addresses served with one protocol.",
       "properties": {
+        "http": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/HttpSettings"
+            }
+          ],
+          "description": "HTTP settings, for protocol `http`."
+        },
         "listen": {
           "description": "Addresses to listen on, such as `[\"0.0.0.0:443\"]`.",
           "items": {
@@ -170,6 +193,60 @@
         }
       ]
     },
+    "Route": {
+      "additionalProperties": false,
+      "description": "A rule of the HTTP listeners: the requests it matches go to its upstream.\n\nWhen several routes match a request, the most specific one wins: an exact host before a\nwildcard host before any host, then the longest path prefix, then the route name in\nalphabetical order.",
+      "properties": {
+        "listeners": {
+          "description": "HTTP listeners whose requests the route sees. Without it, every HTTP listener.",
+          "items": {
+            "pattern": "^[a-z0-9_-]{1,64}$",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "match": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/RouteMatch"
+            }
+          ],
+          "description": "Which requests the route takes. Without it, every request."
+        },
+        "upstream": {
+          "description": "Upstream that serves the requests.",
+          "pattern": "^[a-z0-9_-]{1,64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "upstream"
+      ],
+      "type": "object"
+    },
+    "RouteMatch": {
+      "additionalProperties": false,
+      "description": "Conditions on a request. A request matches when it meets every condition that is set.",
+      "properties": {
+        "hosts": {
+          "description": "Host names, such as `example.com`, or `*.example.com` for one label in front of\n`example.com`. Without it, any host.",
+          "items": {
+            "maxLength": 255,
+            "pattern": "^(\\*\\.)?[A-Za-z0-9_-]{1,63}(\\.[A-Za-z0-9_-]{1,63})*$",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "paths": {
+          "description": "Path prefixes, such as `/api/`. A prefix compares characters, not path segments, so `/api`\nalso matches `/apis`. Without it, any path.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
     "ServerSettings": {
       "additionalProperties": false,
       "description": "Process settings.",
@@ -200,6 +277,51 @@
           "type": "string"
         }
       },
+      "type": "object"
+    },
+    "Target": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "address": {
+              "description": "Address of the server.",
+              "type": "string"
+            },
+            "weight": {
+              "default": 1,
+              "description": "Share of the requests relative to the other targets.",
+              "maximum": 256,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "address"
+          ],
+          "type": "object"
+        }
+      ],
+      "description": "A server of an upstream: its address, such as \"10.0.0.1:8080\", or a table with a weight."
+    },
+    "Upstream": {
+      "additionalProperties": false,
+      "description": "A group of servers that requests are balanced over.",
+      "properties": {
+        "targets": {
+          "description": "The servers. Each request goes to the next one in turn, and a server with weight 2 gets\ntwice the share of one with weight 1.",
+          "items": {
+            "$ref": "#/definitions/Target"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "targets"
+      ],
       "type": "object"
     }
   },
@@ -262,6 +384,17 @@
       },
       "description": "Logging. Static: a restart applies changes."
     },
+    "routes": {
+      "additionalProperties": false,
+      "default": {},
+      "description": "Routes of the HTTP listeners by name. Dynamic: read from this file only when\n`config.source` is `\"file\"`.",
+      "patternProperties": {
+        "^[a-z0-9_-]{1,64}$": {
+          "$ref": "#/definitions/Route"
+        }
+      },
+      "type": "object"
+    },
     "server": {
       "allOf": [
         {
@@ -284,6 +417,17 @@
         "data_dir": "data"
       },
       "description": "Where zora keeps its database and runtime state. Static: a restart applies changes."
+    },
+    "upstreams": {
+      "additionalProperties": false,
+      "default": {},
+      "description": "Upstreams by name. Dynamic: read from this file only when `config.source` is `\"file\"`.",
+      "patternProperties": {
+        "^[a-z0-9_-]{1,64}$": {
+          "$ref": "#/definitions/Upstream"
+        }
+      },
+      "type": "object"
     },
     "version": {
       "const": 1,

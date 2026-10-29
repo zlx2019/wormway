@@ -1,8 +1,9 @@
 //! The configuration model: the types behind `zora.toml`, parsing and validation.
 //!
 //! Static settings (`server`, `log`, `admin`, `storage` and `config`) are read once at startup.
-//! Dynamic settings (`listeners`, `certificates` and the entity tables added later) come from
-//! the database or from this file, as chosen by `config.source`, and can change while running.
+//! Dynamic settings (`listeners`, `routes`, `upstreams`, `certificates` and the entity tables
+//! added later) come from the database or from this file, as chosen by `config.source`, and can
+//! change while running.
 //!
 //! [`Config::from_toml`] loads a configuration in two stages. Parsing checks the syntax and the
 //! structure and stops at the first error, which carries a line and column. Validation checks
@@ -13,7 +14,9 @@ mod duration;
 mod error;
 mod listener;
 mod name;
+mod route;
 mod settings;
+mod upstream;
 mod validate;
 
 use std::collections::BTreeMap;
@@ -23,12 +26,14 @@ use serde::{Deserialize, Serialize};
 pub use certificate::Certificate;
 pub use duration::{Duration, ParseDurationError};
 pub use error::{ConfigError, Issue, ParseError, Position};
-pub use listener::{Listener, ListenerTls, Protocol};
+pub use listener::{HttpSettings, Listener, ListenerTls, Protocol};
 pub use name::{InvalidName, Name};
+pub use route::{HostPattern, InvalidHostPattern, Route, RouteMatch};
 pub use settings::{
     AdminSettings, ConfigSettings, ConfigSource, LogFormat, LogSettings, ServerSettings,
     StorageSettings,
 };
+pub use upstream::{Target, Upstream};
 
 /// The configuration file, `zora.toml`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,6 +61,13 @@ pub struct Config {
     /// Listeners by name. Dynamic: read from this file only when `config.source` is `"file"`.
     #[serde(default)]
     pub listeners: BTreeMap<Name, Listener>,
+    /// Routes of the HTTP listeners by name. Dynamic: read from this file only when
+    /// `config.source` is `"file"`.
+    #[serde(default)]
+    pub routes: BTreeMap<Name, Route>,
+    /// Upstreams by name. Dynamic: read from this file only when `config.source` is `"file"`.
+    #[serde(default)]
+    pub upstreams: BTreeMap<Name, Upstream>,
     /// TLS certificates by name. Dynamic: read from this file only when `config.source` is
     /// `"file"`.
     #[serde(default)]
@@ -97,6 +109,8 @@ impl Config {
         // Keep in sync with the dynamic fields of `Config`.
         DynamicConfig {
             listeners: self.listeners,
+            routes: self.routes,
+            upstreams: self.upstreams,
             certificates: self.certificates,
         }
     }
@@ -105,6 +119,8 @@ impl Config {
     pub fn set_dynamic(&mut self, dynamic: DynamicConfig) {
         // Keep in sync with the dynamic fields of `Config`.
         self.listeners = dynamic.listeners;
+        self.routes = dynamic.routes;
+        self.upstreams = dynamic.upstreams;
         self.certificates = dynamic.certificates;
     }
 
@@ -127,6 +143,12 @@ pub struct DynamicConfig {
     /// Listeners by name.
     #[serde(default)]
     pub listeners: BTreeMap<Name, Listener>,
+    /// Routes of the HTTP listeners by name.
+    #[serde(default)]
+    pub routes: BTreeMap<Name, Route>,
+    /// Upstreams by name.
+    #[serde(default)]
+    pub upstreams: BTreeMap<Name, Upstream>,
     /// TLS certificates by name.
     #[serde(default)]
     pub certificates: BTreeMap<Name, Certificate>,
@@ -413,10 +435,10 @@ mod tests {
     /// rejected there too.
     #[test]
     fn dynamic_settings_round_trip_through_json() {
-        let json = r#"{"listeners":{"web":{"listen":["127.0.0.1:8080"],"protocol":"http"}},"certificates":{}}"#;
+        let json = r#"{"listeners":{"web":{"listen":["127.0.0.1:8080"],"protocol":"http"}},"routes":{"api":{"match":{"paths":["/api/"]},"upstream":"api"}},"upstreams":{"api":{"targets":["127.0.0.1:9000"]}},"certificates":{}}"#;
         let dynamic: DynamicConfig = serde_json::from_str(json).unwrap();
         assert_eq!(serde_json::to_string(&dynamic).unwrap(), json);
-        assert!(serde_json::from_str::<DynamicConfig>(r#"{"routes":{}}"#).is_err());
+        assert!(serde_json::from_str::<DynamicConfig>(r#"{"route":{}}"#).is_err());
     }
 
     /// The dynamic settings are written in the format of `zora.toml` and read back; a whole

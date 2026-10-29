@@ -279,7 +279,7 @@ async fn rejects_malformed_bodies() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(body.contains(r#""code":"invalid_request""#), "{body}");
 
-    let (status, body) = harness.put_config(json!({ "routes": {} }), &[]).await;
+    let (status, body) = harness.put_config(json!({ "route": {} }), &[]).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["error"]["code"], "invalid_request");
 }

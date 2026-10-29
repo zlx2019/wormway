@@ -79,6 +79,7 @@ struct ApplyArgs {
 
 /// Runs the chosen subcommand.
 fn main() -> anyhow::Result<ExitCode> {
+    install_crypto_provider()?;
     match Cli::parse().command {
         Command::Run(args) => run::run(&args.config),
         Command::Check(args) => check(&args.config),
@@ -92,6 +93,15 @@ fn main() -> anyhow::Result<ExitCode> {
             config::apply(&args.target.config, &args.file, comment)
         }
     }
+}
+
+/// Makes aws-lc-rs, with post-quantum key exchange first, the TLS crypto provider of the
+/// process. It has to come first: with ring also compiled in for Pingora, rustls has no default
+/// of its own, and Pingora would install ring the first time it needs TLS.
+fn install_crypto_provider() -> anyhow::Result<()> {
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .map_err(|_| anyhow::anyhow!("a TLS crypto provider is already installed"))
 }
 
 /// `zora check`: prints the problems in the file. The exit code is 0 only if the file is valid.
