@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use super::Duration;
+use super::{Duration, TimeFormat};
 
 /// Process settings.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,6 +39,13 @@ pub struct LogSettings {
     pub level: String,
     /// Output format.
     pub format: LogFormat,
+    /// How the logs write times, the access log included: a strftime pattern such as
+    /// `"%Y-%m-%d %H:%M:%S%.3f"`. RFC 3339 when not set. The combined access log keeps the
+    /// layout of Nginx and only takes the time zone.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time_format: Option<TimeFormat>,
+    /// The time zone of the times in the logs.
+    pub time_zone: TimeZone,
     /// The access log, one line per request. Off when not set; `[log.access]` turns it on with
     /// the defaults.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -46,14 +53,29 @@ pub struct LogSettings {
 }
 
 impl Default for LogSettings {
-    /// `info` level as plain text, without access log.
+    /// `info` level as plain text with times in UTC, without access log.
     fn default() -> Self {
         Self {
             level: "info".to_owned(),
             format: LogFormat::Text,
+            time_format: None,
+            time_zone: TimeZone::Utc,
             access: None,
         }
     }
+}
+
+/// The time zone of the times in the logs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum TimeZone {
+    /// Coordinated Universal Time.
+    #[default]
+    Utc,
+    /// The time zone of the system: the `TZ` environment variable, otherwise `/etc/localtime`.
+    /// Changes to either take effect within a second.
+    Local,
 }
 
 /// The access log. A thread of its own writes the lines, so requests never wait for it; lines

@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use tokio::net::TcpListener;
 use wormway_core::config::{AccessLogFormat, AccessLogSettings};
+use wormway_core::time::LogTime;
 use wormway_gateway::AccessLog;
 use wormway_runtime::Server;
 
@@ -33,7 +34,7 @@ fn json_log(path: &Path) -> AccessLog {
         format: AccessLogFormat::Json,
         path: Some(path.to_owned()),
     };
-    AccessLog::open(&settings, Path::new(".")).expect("open the access log")
+    AccessLog::open(&settings, LogTime::default(), Path::new(".")).expect("open the access log")
 }
 
 /// Sends `GET path` to `web` with a `User-Agent` and returns the status.

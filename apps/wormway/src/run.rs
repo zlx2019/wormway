@@ -14,6 +14,7 @@ use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 use wormway_control::{Admin, AdminToken, Metrics, Store};
 use wormway_core::config::{AdminSettings, Config, ConfigError, ConfigSource, DynamicConfig};
+use wormway_core::time::LogTime;
 use wormway_gateway::{AccessLog, Gateway};
 use wormway_runtime::{ApplyError, Server, Services, Snapshot};
 use wormway_tls::Certificates;
@@ -64,7 +65,9 @@ pub fn run(path: &Path) -> anyhow::Result<ExitCode> {
             .log
             .access
             .as_ref()
-            .map(|settings| AccessLog::open(settings, load::config_dir(path)))
+            .map(|settings| {
+                AccessLog::open(settings, LogTime::new(&config.log), load::config_dir(path))
+            })
             .transpose()?,
         config,
         data_dir,

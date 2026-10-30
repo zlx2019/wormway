@@ -24,6 +24,8 @@ anyhow = "1.0.104"
 arc-swap = "1.9.3"
 async-trait = "0.1.92"
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "query", "tokio", "tracing"] }
+# Times of the logs: strftime patterns and the local time zone. Pingora brings it in already.
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 clap = { version = "4.6.7", features = ["derive", "env"] }
 # Benchmarks only: without parallel analysis and plots, which Wormway does not use.
 criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }

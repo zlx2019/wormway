@@ -645,6 +645,53 @@ fn writes_the_access_log_and_reopens_it() {
     assert_eq!(wormway.exit_code(), Some(0));
 }
 
+/// `[log]` sets how the logs write times, in the local time zone if asked: the process log
+/// with the pattern, the combined access log in the layout of Nginx.
+#[test]
+fn writes_times_as_configured() {
+    let config = format!(
+        r#"{EMPTY}[log]
+time_format = "%Y/%m/%d %H:%M:%S %z"
+time_zone = "local"
+[log.access]
+format = "combined"
+path = "access.log"
+[listeners.web]
+listen = ["127.0.0.1:0"]
+protocol = "http"
+[routes.all]
+respond = {{ status = 204 }}
+"#
+    );
+    let path = temp_config("run-log-times", &config);
+    let log = path.with_file_name("access.log");
+    // Eight hours ahead of UTC, written so that it needs no time zone database.
+    let mut wormway = Wormway::start_with_env(&path, &[("TZ", "CST-8")]);
+    let addr = wormway.listener_addr("web");
+    let ready = wormway.wait_for("Wormway is ready");
+    let shape: String = ready
+        .chars()
+        .take(25)
+        .map(|c| if c.is_ascii_digit() { '9' } else { c })
+        .collect();
+    assert_eq!(shape, "9999/99/99 99:99:99 +9999", "{ready}");
+    assert_eq!(ready.get(19..25), Some(" +0800"), "{ready}");
+
+    assert_eq!(get(&addr, "/", None).0, 204);
+    let deadline = Instant::now() + PATIENCE;
+    while file_lines(&log).is_empty() {
+        assert!(Instant::now() < deadline, "no line in the access log");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let line = &file_lines(&log)[0];
+    assert!(
+        line.contains(r#" +0800] "GET / HTTP/1.1" 204 0 "-" "-""#),
+        "{line}"
+    );
+    wormway.signal("TERM");
+    assert_eq!(wormway.exit_code(), Some(0));
+}
+
 /// A client that leaves in the middle of its request header makes no error in the log, and
 /// Pingora's own messages about failed requests stay out of it too: a target that refuses
 /// connections makes one warning that names the route and the upstream.

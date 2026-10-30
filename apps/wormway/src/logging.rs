@@ -1,26 +1,32 @@
 //! Log output, Pingora's included: Pingora logs through the `log` crate, whose records are
 //! passed on to `tracing` here.
 
+use std::fmt;
 use std::io::IsTerminal;
+use std::time::SystemTime;
 
 use tracing::level_filters::LevelFilter;
 use tracing_log::AsLog;
 use tracing_log::log::{self, Level, Log, Metadata, Record};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::filter::ParseError;
+use tracing_subscriber::fmt::format::Writer;
+use tracing_subscriber::fmt::time::FormatTime;
 use wormway_core::config::{LogFormat, LogSettings};
+use wormway_core::time::{Fraction, LogTime};
 
 /// Builds the log filter from `log.level`.
 pub fn filter(settings: &LogSettings) -> Result<EnvFilter, ParseError> {
     EnvFilter::try_new(&settings.level)
 }
 
-/// Sends logs to standard error in the configured format, the records of the `log` crate
-/// included.
+/// Sends logs to standard error in the configured format, with times in the configured format
+/// and time zone, the records of the `log` crate included.
 pub fn init(settings: &LogSettings) -> anyhow::Result<()> {
     let builder = tracing_subscriber::fmt()
         .with_env_filter(filter(settings)?)
-        .with_writer(std::io::stderr);
+        .with_writer(std::io::stderr)
+        .with_timer(Timer(LogTime::new(settings)));
     let installed = match settings.format {
         LogFormat::Text => tracing::subscriber::set_global_default(
             builder.with_ansi(std::io::stderr().is_terminal()).finish(),
@@ -33,6 +39,16 @@ pub fn init(settings: &LogSettings) -> anyhow::Result<()> {
     // Records above what the filter lets through stop in the `log` macros.
     log::set_max_level(LevelFilter::current().as_log());
     Ok(())
+}
+
+/// Writes the time of each log line as `[log]` asks, to the microsecond without a pattern.
+struct Timer(LogTime);
+
+impl FormatTime for Timer {
+    /// Writes the time now.
+    fn format_time(&self, w: &mut Writer<'_>) -> fmt::Result {
+        self.0.write(w, SystemTime::now(), Fraction::Micros)
+    }
 }
 
 /// Passes the records of the `log` crate on to `tracing`, at debug level for the errors in

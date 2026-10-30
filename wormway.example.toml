@@ -13,6 +13,9 @@ shutdown_timeout = "30s"    # how long open connections may take to finish on sh
 [log]
 level = "info"              # tracing directives, such as "info,wormway_runtime=debug"
 format = "text"             # text | json
+time_zone = "utc"           # utc | local (the TZ variable, otherwise the system's time zone)
+# time_format = "%Y-%m-%d %H:%M:%S%.3f"   # strftime; RFC 3339 if not set. The access log takes it
+                                          # too, but its combined format keeps the layout of Nginx.
 
 # The access log, off unless this table is set: one line per request.
 [log.access]

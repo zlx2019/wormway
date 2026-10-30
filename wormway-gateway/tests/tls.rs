@@ -21,6 +21,7 @@ use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
 use wormway_core::config::{AccessLogFormat, AccessLogSettings, ConfigError};
+use wormway_core::time::LogTime;
 use wormway_gateway::AccessLog;
 use wormway_runtime::ApplyError;
 
@@ -345,7 +346,8 @@ async fn logs_the_tls_and_http_versions() {
         format: AccessLogFormat::Json,
         path: Some(log.clone()),
     };
-    let access_log = AccessLog::open(&settings, Path::new(".")).expect("open the access log");
+    let access_log = AccessLog::open(&settings, LogTime::default(), Path::new("."))
+        .expect("open the access log");
     let server = start_logged(&text, pki.dir.path(), Some(access_log)).await;
     let secure = addr(&server, "secure").await;
 

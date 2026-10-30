@@ -444,6 +444,23 @@
           "default": "info",
           "description": "Log filter in `tracing` directive syntax, such as `\"info\"` or\n`\"info,wormway_runtime=debug\"`.",
           "type": "string"
+        },
+        "time_format": {
+          "description": "How the logs write times, the access log included: a strftime pattern such as\n`\"%Y-%m-%d %H:%M:%S%.3f\"`. RFC 3339 when not set. The combined access log keeps the\nlayout of Nginx and only takes the time zone.",
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "time_zone": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/TimeZone"
+            }
+          ],
+          "default": "utc",
+          "description": "The time zone of the times in the logs."
         }
       },
       "type": "object"
@@ -820,6 +837,21 @@
       ],
       "description": "A server of an upstream: its address, such as \"10.0.0.1:8080\" or \"api.internal:8080\", or a table with a weight. Host names are resolved when the configuration is applied and every 30 seconds after."
     },
+    "TimeZone": {
+      "description": "The time zone of the times in the logs.",
+      "oneOf": [
+        {
+          "const": "utc",
+          "description": "Coordinated Universal Time.",
+          "type": "string"
+        },
+        {
+          "const": "local",
+          "description": "The time zone of the system: the `TZ` environment variable, otherwise `/etc/localtime`.\nChanges to either take effect within a second.",
+          "type": "string"
+        }
+      ]
+    },
     "Timeouts": {
       "additionalProperties": false,
       "description": "Time limits of the connections and requests to the targets of an upstream. A request that\nruns out of time is answered with 504.",
@@ -1092,7 +1124,8 @@
       ],
       "default": {
         "format": "text",
-        "level": "info"
+        "level": "info",
+        "time_zone": "utc"
       },
       "description": "Logging. Static: a restart applies changes."
     },

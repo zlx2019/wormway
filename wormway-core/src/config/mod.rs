@@ -18,6 +18,7 @@ mod listener;
 mod name;
 mod route;
 mod settings;
+mod time_format;
 mod upstream;
 mod validate;
 
@@ -40,8 +41,9 @@ pub use route::{
 };
 pub use settings::{
     AccessLogFormat, AccessLogSettings, AdminSettings, ConfigSettings, ConfigSource, LogFormat,
-    LogSettings, ServerSettings, StorageSettings,
+    LogSettings, ServerSettings, StorageSettings, TimeZone,
 };
+pub use time_format::{InvalidTimeFormat, TimeFormat};
 pub use upstream::{
     Balance, HashKey, HealthCheck, HealthCheckKind, InvalidTargetAddress, PassiveCheck,
     RouteTimeouts, Target, TargetAddress, Timeouts, Upstream, UpstreamProtocol, UpstreamTls,
@@ -379,6 +381,37 @@ mod tests {
         assert_eq!(access.path, Some(PathBuf::from("logs/access.log")));
         let error = parse_error("version = 1\n[log.access]\nformat = \"apache\"\n");
         assert!(error.to_string().contains("apache"), "{error}");
+    }
+
+    /// The logs write times in RFC 3339 and UTC unless `log` sets a strftime pattern or the
+    /// local time zone; patterns that chrono cannot read are rejected.
+    #[test]
+    fn reads_log_time_settings() {
+        let plain = Config::from_toml("version = 1").unwrap();
+        assert_eq!(plain.log.time_format, None);
+        assert_eq!(plain.log.time_zone, TimeZone::Utc);
+        let config = Config::from_toml(
+            "version = 1\n[log]\ntime_format = \"%Y-%m-%d %H:%M:%S%.3f\"\ntime_zone = \"local\"\n",
+        )
+        .unwrap();
+        let format = config.log.time_format.as_ref().map(TimeFormat::as_str);
+        assert_eq!(format, Some("%Y-%m-%d %H:%M:%S%.3f"));
+        assert_eq!(config.log.time_zone, TimeZone::Local);
+        let text = toml::to_string(&config).unwrap();
+        assert_eq!(Config::from_toml(&text).unwrap(), config);
+
+        for pattern in ["%Y-%Q", "%", ""] {
+            let error = parse_error(&format!("version = 1\n[log]\ntime_format = {pattern:?}\n"));
+            assert_eq!(error.position, at(3, 15), "{error}");
+            assert!(
+                error
+                    .message
+                    .starts_with(&format!("invalid time format {pattern:?}")),
+                "{error}"
+            );
+        }
+        let error = parse_error("version = 1\n[log]\ntime_zone = \"Asia/Shanghai\"\n");
+        assert!(error.to_string().contains("Asia/Shanghai"), "{error}");
     }
 
     /// Serializing to TOML and parsing again gives the same configuration.

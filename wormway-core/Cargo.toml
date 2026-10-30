@@ -12,6 +12,7 @@ publish.workspace = true
 schema = ["dep:schemars"]
 
 [dependencies]
+chrono.workspace = true
 regex.workspace = true
 schemars = { workspace = true, optional = true }
 serde.workspace = true

@@ -12,7 +12,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError
 use std::time::{Duration, SystemTime};
 
 use wormway_core::config::{AccessLogFormat, AccessLogSettings, Name};
-use wormway_core::time;
+use wormway_core::time::{Fraction, LogTime};
 
 /// Lines that may wait for the writer; more are dropped and counted.
 const QUEUE: usize = 8192;
@@ -33,8 +33,8 @@ pub struct AccessLog {
 
 impl AccessLog {
     /// Opens the access log of `settings`, whose path is relative to `base`, the directory of
-    /// the configuration file, and starts its writer.
-    pub fn open(settings: &AccessLogSettings, base: &Path) -> io::Result<Self> {
+    /// the configuration file, and starts its writer, which writes times as `time` says.
+    pub fn open(settings: &AccessLogSettings, time: LogTime, base: &Path) -> io::Result<Self> {
         let output = Output::open(settings.path.as_ref().map(|path| base.join(path)))?;
         metrics::describe_counter!(
             DROPPED_TOTAL,
@@ -45,6 +45,7 @@ impl AccessLog {
         let writer = Writer {
             output,
             format: settings.format,
+            time,
             reopen: reopen.clone(),
             failing: false,
         };
@@ -115,10 +116,14 @@ pub(crate) struct Record {
 }
 
 impl Record {
-    /// Writes the record as one line of JSON, without the line break.
-    pub(crate) fn json(&self, line: &mut String) {
+    /// Writes the record as one line of JSON, without the line break, with its time as `time`
+    /// says, to the millisecond without a pattern.
+    pub(crate) fn json(&self, line: &mut String, time: &LogTime) {
+        let mut at = String::new();
+        // Writing to a string does not fail.
+        let _ = time.write(&mut at, self.time, Fraction::Millis);
         let mut object = JsonObject::new(line);
-        object.string("time", Some(&time::rfc3339(self.time)));
+        object.string("time", Some(&at));
         object.string(
             "client_ip",
             self.client.map(|client| client.ip().to_string()).as_deref(),
@@ -149,11 +154,14 @@ impl Record {
     }
 
     /// Writes the record in the combined log format of Nginx, without the line break:
-    /// `client - - [time] "request" status bytes "referer" "user agent"`.
-    pub(crate) fn combined(&self, line: &mut String) {
+    /// `client - - [time] "request" status bytes "referer" "user agent"`. The time keeps the
+    /// layout of Nginx, in the time zone of `time`.
+    pub(crate) fn combined(&self, line: &mut String, time: &LogTime) {
         let client = self.client.map(|client| client.ip().to_string());
         line.push_str(client.as_deref().unwrap_or("-"));
-        let _ = write!(line, " - - [{}] \"", time::common_log(self.time));
+        line.push_str(" - - [");
+        let _ = time.write_common_log(line, self.time);
+        line.push_str("] \"");
         push_escaped(line, &self.method);
         line.push(' ');
         push_escaped(line, &self.uri);
@@ -270,6 +278,8 @@ struct Writer {
     output: Output,
     /// Format of the lines.
     format: AccessLogFormat,
+    /// How the lines write times.
+    time: LogTime,
     /// Set when the file should be opened again.
     reopen: Arc<AtomicBool>,
     /// Whether writing failed last time, so that a failure is logged once.
@@ -304,8 +314,8 @@ impl Writer {
     fn write(&mut self, record: &Record, line: &mut String) {
         line.clear();
         match self.format {
-            AccessLogFormat::Json => record.json(line),
-            AccessLogFormat::Combined => record.combined(line),
+            AccessLogFormat::Json => record.json(line, &self.time),
+            AccessLogFormat::Combined => record.combined(line, &self.time),
         }
         line.push('\n');
         let written = self.output.write(line.as_bytes());
@@ -412,6 +422,8 @@ fn open_file(path: &Path) -> io::Result<File> {
 mod tests {
     use std::time::UNIX_EPOCH;
 
+    use wormway_core::config::LogSettings;
+
     use super::*;
 
     /// A request with every field set, and a quote, a backslash, a tab and a non-ASCII
@@ -445,7 +457,7 @@ mod tests {
     #[test]
     fn writes_json_lines() {
         let mut line = String::new();
-        record().json(&mut line);
+        record().json(&mut line, &LogTime::default());
         assert_eq!(
             line,
             r#"{"time":"2025-10-29T00:00:00.123Z","client_ip":"::1","client_port":52000,"method":"GET","host":"api.local","uri":"/v1/users?q=a b","protocol":"HTTP/1.1","status":200,"request_bytes":0,"response_bytes":1234,"duration":0.001500,"listener":"web","route":"api","upstream":"app","target":"10.0.0.1:80","upstream_duration":0.001200,"request_id":"0123abcd","user_agent":"say \"hi\"\t\\ é","referer":null,"tls":"TLSv1.3","error":null}"#
@@ -456,10 +468,32 @@ mod tests {
     #[test]
     fn writes_combined_lines() {
         let mut line = String::new();
-        record().combined(&mut line);
+        record().combined(&mut line, &LogTime::default());
         assert_eq!(
             line,
             r#"::1 - - [29/Oct/2025:00:00:00 +0000] "GET /v1/users?q=a b HTTP/1.1" 200 1234 "-" "say \x22hi\x22\x09\x5C \xC3\xA9""#
+        );
+    }
+
+    /// A time format changes the time of JSON lines; combined lines keep the layout of Nginx.
+    #[test]
+    fn writes_times_as_configured() {
+        let settings = LogSettings {
+            time_format: Some("%Y/%m/%d %H:%M:%S%.3f".parse().unwrap()),
+            ..LogSettings::default()
+        };
+        let time = LogTime::new(&settings);
+        let mut line = String::new();
+        record().json(&mut line, &time);
+        assert!(
+            line.starts_with(r#"{"time":"2025/10/29 00:00:00.123","client_ip":"#),
+            "{line}"
+        );
+        line.clear();
+        record().combined(&mut line, &time);
+        assert!(
+            line.starts_with("::1 - - [29/Oct/2025:00:00:00 +0000] \"GET "),
+            "{line}"
         );
     }
 
@@ -472,7 +506,7 @@ mod tests {
             format: AccessLogFormat::Combined,
             path: Some(PathBuf::from("logs/access.log")),
         };
-        let log = AccessLog::open(&settings, dir.path()).unwrap();
+        let log = AccessLog::open(&settings, LogTime::default(), dir.path()).unwrap();
         let path = dir.path().join("logs/access.log");
         let moved = dir.path().join("logs/access.log.1");
         log.write(record());
