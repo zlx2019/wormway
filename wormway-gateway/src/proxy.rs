@@ -8,19 +8,21 @@ use std::time::{Duration, Instant, SystemTime};
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
+use bytes::Bytes;
 use http::{HeaderValue, Version};
 use pingora::http::{HMap, Method, RequestHeader, ResponseHeader};
 use pingora::lb::Backend;
 use pingora::proxy::{FailToProxy, ProxyHttp, ProxyWarnLogContext, Session};
 use pingora::upstreams::peer::HttpPeer;
 use pingora::{Error, ErrorSource, ErrorType, HTTPStatus, RetryType};
-use wormway_core::config::{HashKey, Name, Rewrite};
+use wormway_core::config::{HashKey, Name, RateLimitKey, Rewrite};
 use wormway_core::routing::{self, Request, RequestHeaders};
 use wormway_tls::Challenges;
 
 use crate::access_log::{AccessLog, Record};
 use crate::compress;
 use crate::headers::{self, HeaderEdits, RequestId};
+use crate::limit::{self, Key};
 use crate::probe::describe;
 use crate::route::{CompiledRoute, FixedResponse, Handler, RedirectTarget};
 use crate::snapshot::GatewaySnapshot;
@@ -76,6 +78,12 @@ pub(crate) struct RequestContext {
     /// The answer to the HTTP-01 challenge the request asks for, if it asks for one in
     /// progress.
     challenge: Option<String>,
+    /// The request counted among those of its route in progress, while the route limits them.
+    admitted: Option<Inflight>,
+    /// Bytes of the request body read so far, while the route limits its size.
+    body_bytes: u64,
+    /// Why the limits of the route turned the request away, if they did.
+    turned_away: Option<&'static str>,
 }
 
 impl Proxy {
@@ -136,6 +144,9 @@ impl ProxyHttp for Proxy {
             answered: false,
             counted: false,
             challenge: None,
+            admitted: None,
+            body_bytes: 0,
+            turned_away: None,
         }
     }
 
@@ -170,7 +181,8 @@ impl ProxyHttp for Proxy {
     }
 
     /// Answers the requests that do not go to an upstream: HTTP-01 challenges, 404 without a
-    /// route, and the redirects and fixed responses of routes.
+    /// route, requests that the limits of their route turn away, and the redirects and fixed
+    /// responses of routes.
     async fn request_filter(
         &self,
         session: &mut Session,
@@ -184,12 +196,48 @@ impl ProxyHttp for Proxy {
             session.respond_error(404).await?;
             return Ok(true);
         };
+        if let Some(rejection) = admit(session, ctx, &route) {
+            ctx.turned_away = Some(rejection.reason());
+            tracing::debug!(
+                listener = %self.listener,
+                route = %route.name,
+                request_id = %ctx.request_id.as_str(),
+                "request turned away: {}",
+                rejection.reason()
+            );
+            turn_away(session, &rejection, &route.response_headers).await?;
+            return Ok(true);
+        }
         match &route.handler {
             Handler::Upstream(_) => return Ok(false),
             Handler::Redirect(target) => redirect(session, target, &route.response_headers).await?,
             Handler::Respond(fixed) => respond(session, fixed, &route.response_headers).await?,
         }
         Ok(true)
+    }
+
+    /// Counts the request body against the size limit of its route, which bodies without a
+    /// length can only meet as they arrive. A body over the limit ends the request with 413,
+    /// or cuts it off if the response has started.
+    async fn request_body_filter(
+        &self,
+        _session: &mut Session,
+        body: &mut Option<Bytes>,
+        _end_of_stream: bool,
+        ctx: &mut RequestContext,
+    ) -> pingora::Result<()> {
+        let limit = ctx.route.as_ref().and_then(|route| route.max_body_size);
+        if let (Some(limit), Some(chunk)) = (limit, body.as_ref()) {
+            ctx.body_bytes = ctx.body_bytes.saturating_add(chunk.len() as u64);
+            if ctx.body_bytes > limit {
+                ctx.turned_away = Some(Rejection::TooLarge.reason());
+                return Err(Error::explain(
+                    HTTPStatus(413),
+                    Rejection::TooLarge.reason(),
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Picks the target of the request from the upstream of its route, unless a failed attempt
@@ -448,14 +496,23 @@ impl ProxyHttp for Proxy {
 impl Proxy {
     /// Logs a request that failed with `error`, at a level that follows where the failure came
     /// from: a warning for the upstream and for answers Wormway chose, such as 503 without a
-    /// usable target; debug for clients that went away; an error for the rest.
+    /// usable target; debug for clients that went away and for requests that the limits of
+    /// their route turned away; an error for the rest.
     fn log_failure(&self, error: &Error, ctx: &RequestContext, status: u16) {
         let route = OrDash(ctx.route.as_ref().map(|route| route.name.as_str()));
+        let request_id = ctx.request_id.as_str();
+        // Such as a body that grew past the limit while it came in: a mistake of the client.
+        if let Some(reason) = ctx.turned_away {
+            tracing::debug!(
+                listener = %self.listener, route = %route, status, request_id = %request_id,
+                "request turned away: {reason}"
+            );
+            return;
+        }
         let upstream = ctx.route.as_ref().and_then(|route| route.upstream());
         let upstream = OrDash(upstream.map(|upstream| upstream.name().as_str()));
         let target = ctx.tried.last().map(|target| target.addr.to_string());
         let target = OrDash(target.as_deref());
-        let request_id = ctx.request_id.as_str();
         let reason = describe(error);
         match (error.etype(), error.esource()) {
             (_, ErrorSource::Downstream) => tracing::debug!(
@@ -527,7 +584,10 @@ impl Proxy {
             user_agent: header("user-agent"),
             referer: header("referer"),
             tls,
-            error: error.map(describe),
+            error: ctx
+                .turned_away
+                .map(str::to_owned)
+                .or_else(|| error.map(describe)),
         }
     }
 }
@@ -612,6 +672,105 @@ async fn respond(
             .await?;
     }
     Ok(())
+}
+
+/// Why the limits of a route turn a request away.
+enum Rejection {
+    /// The route has as many requests in progress as it allows: 503.
+    Busy,
+    /// The request body is larger than the route allows: 413.
+    TooLarge,
+    /// The key of the request has used up its requests for now: 429, with the time to wait.
+    Limited(Duration),
+}
+
+impl Rejection {
+    /// Returns the status of the answer.
+    fn status(&self) -> u16 {
+        match self {
+            Self::Busy => 503,
+            Self::TooLarge => 413,
+            Self::Limited(_) => 429,
+        }
+    }
+
+    /// Returns the reason, for the logs.
+    fn reason(&self) -> &'static str {
+        match self {
+            Self::Busy => "concurrency limit reached",
+            Self::TooLarge => "request body larger than max_body_size",
+            Self::Limited(_) => "rate limit reached",
+        }
+    }
+}
+
+/// Checks the limits of `route` for the request, in this order: the requests in progress, the
+/// length of the body, and the rate. Returns why the request is turned away, if it is.
+fn admit(session: &Session, ctx: &mut RequestContext, route: &CompiledRoute) -> Option<Rejection> {
+    if let Some(limit) = route.concurrency_limit {
+        ctx.admitted = Inflight::within(&route.inflight, limit);
+        if ctx.admitted.is_none() {
+            return Some(Rejection::Busy);
+        }
+    }
+    if let Some(limit) = route.max_body_size
+        && content_length(session.req_header()).is_some_and(|length| length > limit)
+    {
+        return Some(Rejection::TooLarge);
+    }
+    if let Some(limiter) = &route.rate_limit
+        && let Err(wait) = limiter.check(&rate_key(session, limiter.key()), Instant::now())
+    {
+        telemetry::rate_limited(&route.name);
+        return Some(Rejection::Limited(wait));
+    }
+    None
+}
+
+/// Answers a request that the limits of its route turn away, with the header changes of the
+/// route, such as the CORS headers that let browsers read the answer. Pingora closes the
+/// connection afterwards if the request body is still coming, rather than reading it.
+async fn turn_away(
+    session: &mut Session,
+    rejection: &Rejection,
+    response_headers: &HeaderEdits,
+) -> pingora::Result<()> {
+    let mut response = ResponseHeader::build(rejection.status(), Some(3))?;
+    response.insert_header("Content-Length", "0")?;
+    if let Rejection::Limited(wait) = rejection {
+        response.insert_header("Retry-After", limit::retry_after(*wait).to_string())?;
+    }
+    response_headers.apply(&mut response)?;
+    session
+        .write_response_header(Box::new(response), true)
+        .await
+}
+
+/// Returns what the rate limit counts the request by: the client IP address, the value of a
+/// header, or the client IP address when the request does not have the header.
+fn rate_key<'a>(session: &'a Session, key: &RateLimitKey) -> Key<'a> {
+    let header = match key {
+        RateLimitKey::Route => return Key::Route,
+        RateLimitKey::Header(name) => session.req_header().headers.get(name.as_str()),
+        RateLimitKey::ClientIp => None,
+    };
+    match header {
+        Some(value) => Key::Value(value.as_bytes()),
+        // Without an IP address, as over a Unix socket, the requests count together.
+        None => client_ip(session).map_or(Key::Route, Key::Ip),
+    }
+}
+
+/// Returns the length of the request body that `Content-Length` announces, if it does.
+fn content_length(request: &RequestHeader) -> Option<u64> {
+    request
+        .headers
+        .get(http::header::CONTENT_LENGTH)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
 }
 
 /// Rewrites the path of `request` as `rewrite` asks, from its normalized path, and keeps the

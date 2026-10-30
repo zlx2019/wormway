@@ -15,6 +15,7 @@ mod access_log;
 mod compress;
 mod headers;
 mod health;
+mod limit;
 mod listener;
 mod probe;
 mod proxy;

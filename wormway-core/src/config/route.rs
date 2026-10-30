@@ -10,7 +10,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::http::is_header_value;
 use super::{
-    Action, HeaderName, HeaderRules, Method, Name, Redirect, Respond, Rewrite, RouteTimeouts,
+    Action, ByteSize, HeaderName, HeaderRules, Method, Name, RateLimit, Redirect, Respond, Rewrite,
+    RouteTimeouts,
 };
 
 /// A rule of the HTTP listeners: the requests it matches go to its upstream, or get a redirect
@@ -75,6 +76,18 @@ pub struct Route {
     /// `{ read = "5m" }` for slow reports.
     #[serde(default, skip_serializing_if = "RouteTimeouts::is_default")]
     pub timeouts: RouteTimeouts,
+    /// How many requests each client, or another key, may make per period, such as
+    /// `{ requests = 100, per = "1s" }`; more are answered with 429.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit: Option<RateLimit>,
+    /// The most requests of the route in progress at once; more are answered with 503 right
+    /// away.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub concurrency_limit: Option<u32>,
+    /// The largest request body, such as `"10MiB"`; larger ones are answered with 413. Without
+    /// it, any size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_body_size: Option<ByteSize>,
 }
 
 impl Route {
@@ -684,5 +697,38 @@ mod tests {
             error.message().starts_with("invalid header value"),
             "{error}"
         );
+    }
+
+    /// Limits are read and written back in the same form; sizes need a unit.
+    #[test]
+    fn reads_and_writes_limits() {
+        let route: Route = toml::from_str(
+            r#"
+            upstream = "api"
+            rate_limit = { requests = 100, per = "1s" }
+            concurrency_limit = 50
+            max_body_size = "10MiB"
+            "#,
+        )
+        .unwrap();
+        let rate_limit = route.rate_limit.as_ref().unwrap();
+        assert_eq!(
+            (rate_limit.requests, rate_limit.per.get().as_secs()),
+            (100, 1)
+        );
+        assert_eq!(route.concurrency_limit, Some(50));
+        assert_eq!(route.max_body_size.map(ByteSize::bytes), Some(10 << 20));
+        let json = serde_json::to_string(&route).unwrap();
+        assert_eq!(
+            json,
+            r#"{"upstream":"api","rate_limit":{"requests":100,"per":"1s"},"concurrency_limit":50,"max_body_size":"10MiB"}"#
+        );
+        assert_eq!(serde_json::from_str::<Route>(&json).unwrap(), route);
+        let toml = toml::to_string(&route).unwrap();
+        assert_eq!(toml::from_str::<Route>(&toml).unwrap(), route);
+
+        let error =
+            toml::from_str::<Route>("upstream = \"api\"\nmax_body_size = 1024").unwrap_err();
+        assert!(error.message().contains("invalid type"), "{error}");
     }
 }

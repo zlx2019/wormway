@@ -3,12 +3,14 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 
 use wormway_core::config::{
-    Action, Issue, Name, Redirect, RedirectPart, Respond, Rewrite, Route, RouteTimeouts,
+    Action, ByteSize, Issue, Name, Redirect, RedirectPart, Respond, Rewrite, Route, RouteTimeouts,
 };
 
 use crate::headers::HeaderEdits;
+use crate::limit::RateLimiter;
 use crate::stats::Window;
 use crate::upstream::CompiledUpstream;
 
@@ -32,6 +34,15 @@ pub(crate) struct CompiledRoute {
     pub(crate) access_log: bool,
     /// The traffic of the route, kept while the route keeps its name.
     pub(crate) stats: Arc<Window>,
+    /// The rate limit, whose buckets are kept while its settings stay the same.
+    pub(crate) rate_limit: Option<Arc<RateLimiter>>,
+    /// The most requests in progress at once, if limited.
+    pub(crate) concurrency_limit: Option<usize>,
+    /// The requests in progress while the route limits them, counted across configurations
+    /// while the route keeps its name.
+    pub(crate) inflight: Arc<AtomicUsize>,
+    /// The largest request body in bytes, if limited.
+    pub(crate) max_body_size: Option<u64>,
 }
 
 /// What a route does with a request.
@@ -45,14 +56,15 @@ pub(crate) enum Handler {
 }
 
 impl CompiledRoute {
-    /// Compiles route `name`, with its upstream from `upstreams`, counting its traffic in
-    /// `stats`. The route passed validation, so this fails only if the validation rules miss a
-    /// case.
+    /// Compiles route `name`, with its upstream from `upstreams`. It keeps the traffic and the
+    /// requests in progress of `running`, the route of the same name in effect, and its rate
+    /// limit if the settings are the same. The route passed validation, so this fails only if
+    /// the validation rules miss a case.
     pub(crate) fn new(
         name: &Name,
         route: &Route,
         upstreams: &BTreeMap<Name, Arc<CompiledUpstream>>,
-        stats: Arc<Window>,
+        running: Option<&CompiledRoute>,
     ) -> Result<Self, Issue> {
         let at = |field: &str| format!("routes.{name}{field}");
         let handler = match route.action() {
@@ -77,6 +89,13 @@ impl CompiledRoute {
             .map_err(|problem| Issue::new(at(".request_headers"), problem))?;
         let response_headers = HeaderEdits::new(&route.response_headers)
             .map_err(|problem| Issue::new(at(".response_headers"), problem))?;
+        let rate_limit = route.rate_limit.as_ref().map(|settings| {
+            running
+                .and_then(|running| running.rate_limit.as_ref())
+                .filter(|limiter| limiter.serves(settings))
+                .cloned()
+                .unwrap_or_else(|| Arc::new(RateLimiter::new(settings)))
+        });
         Ok(Self {
             name: name.clone(),
             handler,
@@ -86,7 +105,11 @@ impl CompiledRoute {
             compress: route.compress(),
             timeouts: route.timeouts,
             access_log: route.access_log(),
-            stats,
+            stats: running.map_or_else(Arc::default, |running| running.stats.clone()),
+            rate_limit,
+            concurrency_limit: route.concurrency_limit.map(|limit| limit as usize),
+            inflight: running.map_or_else(Arc::default, |running| running.inflight.clone()),
+            max_body_size: route.max_body_size.map(ByteSize::bytes),
         })
     }
 

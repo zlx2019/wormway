@@ -10,9 +10,11 @@ publish.workspace = true
 [dependencies]
 arc-swap.workspace = true
 async-trait.workspace = true
+bytes.workspace = true
 http.workspace = true
 metrics.workspace = true
 pingora.workspace = true
+quick_cache.workspace = true
 rustls.workspace = true
 tokio = { workspace = true, features = ["io-util", "net", "rt", "time"] }
 tracing.workspace = true

@@ -45,6 +45,8 @@ metrics = "0.24.6"
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 # Pinned: every 0.x release breaks the API. Upgrades happen between milestones.
 pingora = { version = "=0.9.0", default-features = false, features = ["lb", "proxy", "rustls"] }
+# The state of each key of the rate limits: bounded, and keys seen once are evicted first.
+quick_cache = "0.7.0"
 rcgen = { version = "0.14.10", default-features = false, features = ["aws_lc_rs", "pem"] }
 regex = "1.13.1"
 reqwest = { version = "0.13.5", default-features = false, features = ["json"] }

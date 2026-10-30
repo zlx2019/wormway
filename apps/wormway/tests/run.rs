@@ -471,10 +471,10 @@ fn metrics_with(addr: &str, token: &str, expected: &[String]) -> String {
     }
 }
 
-/// The metrics count requests by listener, route and status, and attempts at targets by
-/// upstream and result, retries included, but not requests without a usable target; durations
-/// go into buckets. The health of every target and the expiry of every certificate come from
-/// the state in effect.
+/// The metrics count requests by listener, route and status, attempts at targets by upstream
+/// and result, retries included, but not requests without a usable target, and requests that
+/// rate limits turned away; durations go into buckets. The health of every target and the
+/// expiry of every certificate come from the state in effect.
 #[test]
 fn exports_metrics() {
     let (target, closed, refused) = (upstream("hello"), closed_port(), closed_port());
@@ -499,6 +499,12 @@ upstream = "flaky"
 [routes.down]
 match = {{ paths = ["/down"] }}
 upstream = "down"
+[routes.limited]
+match = {{ paths = ["/limited"] }}
+upstream = "limited"
+rate_limit = {{ requests = 1, per = "1h" }}
+[upstreams.limited]
+targets = ["{target}"]
 [upstreams.app]
 targets = ["{target}", "{closed}"]
 health_check = {{ kind = "tcp", interval = "1h" }}
@@ -533,6 +539,8 @@ key = "site.key"
     // Round robin sends at least one of the two to the closed port first, then retries.
     assert_eq!(get(&web, "/flaky", None).0, 200);
     assert_eq!(get(&web, "/flaky", None).0, 200);
+    assert_eq!(get(&web, "/limited", None).0, 200);
+    assert_eq!(get(&web, "/limited", None).0, 429);
 
     let requests = |route: &str, status| {
         format!(
@@ -555,6 +563,9 @@ key = "site.key"
         requests("broken", 502),
         requests("slow", 504),
         requests("down", 503),
+        requests("limited", 200),
+        requests("limited", 429),
+        r#"wormway_rate_limited_total{route="limited"} 1"#.to_owned(),
         attempts("app", "ok", 1),
         attempts("broken", "error", 2),
         attempts("slow", "timeout", 1),

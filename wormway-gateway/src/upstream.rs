@@ -511,7 +511,7 @@ impl Counters {
     }
 }
 
-/// A request in progress at a target, counted until the guard is dropped.
+/// A request in progress at a target or on a route, counted until the guard is dropped.
 pub(crate) struct Inflight(Arc<AtomicUsize>);
 
 impl Inflight {
@@ -519,6 +519,14 @@ impl Inflight {
     fn new(counter: Arc<AtomicUsize>) -> Self {
         counter.fetch_add(1, Ordering::Relaxed);
         Self(counter)
+    }
+
+    /// Counts one more request on `counter` if fewer than `limit` are in progress.
+    pub(crate) fn within(counter: &Arc<AtomicUsize>, limit: usize) -> Option<Self> {
+        let before = counter.fetch_add(1, Ordering::Relaxed);
+        let counted = Self(counter.clone());
+        // Over the limit, dropping the guard takes the request back off.
+        (before < limit).then_some(counted)
     }
 }
 

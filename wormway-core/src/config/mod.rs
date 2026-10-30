@@ -14,10 +14,12 @@ mod certificate;
 mod duration;
 mod error;
 mod http;
+mod limit;
 mod listener;
 mod name;
 mod route;
 mod settings;
+mod size;
 mod time_format;
 mod upstream;
 mod validate;
@@ -33,6 +35,7 @@ pub use error::{ConfigError, Issue, ParseError, Position};
 pub use http::{
     HeaderName, HeaderValue, InvalidHeaderName, InvalidHeaderValue, InvalidMethod, Method,
 };
+pub use limit::{RateLimit, RateLimitKey};
 pub use listener::{HttpSettings, Listener, ListenerTls, Protocol, UnknownSni};
 pub use name::{InvalidName, Name};
 pub use route::{
@@ -43,6 +46,7 @@ pub use settings::{
     AccessLogFormat, AccessLogSettings, AcmeSettings, AdminSettings, ConfigSettings, ConfigSource,
     LogFormat, LogSettings, ServerSettings, StorageSettings, TimeZone,
 };
+pub use size::{ByteSize, ParseByteSizeError};
 pub use time_format::{InvalidTimeFormat, TimeFormat};
 pub use upstream::{
     Balance, HashKey, HealthCheck, HealthCheckKind, InvalidTargetAddress, PassiveCheck,

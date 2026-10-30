@@ -654,6 +654,68 @@
         }
       ]
     },
+    "RateLimit": {
+      "additionalProperties": false,
+      "description": "A limit on the rate of the requests of a route, counted by key: each key may make `requests`\nrequests at once and gets them back evenly over `per`, so that on average it makes at most\n`requests` requests per `per`. Requests over the limit are answered with 429 and a\n`Retry-After` header. Each instance of Wormway counts on its own.",
+      "properties": {
+        "key": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RateLimitKey"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What the requests are counted by. Default: `\"client_ip\"`."
+        },
+        "per": {
+          "description": "The period, such as `\"1s\"` or `\"1m\"`.",
+          "pattern": "^([0-9]+(ms|s|m|h|d))+$",
+          "type": "string"
+        },
+        "requests": {
+          "description": "Requests per period, which is also the most that may come at once.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "requests",
+        "per"
+      ],
+      "type": "object"
+    },
+    "RateLimitKey": {
+      "description": "What the requests of a rate limit are counted by.",
+      "oneOf": [
+        {
+          "const": "client_ip",
+          "description": "The IP address of the client.",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The value of a request header, such as `{ header = \"X-Tenant\" }`. Requests without the\nheader count by the IP address of the client.",
+          "properties": {
+            "header": {
+              "pattern": "^[A-Za-z0-9!#$%&'*+.^_`|~-]+$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "header"
+          ],
+          "type": "object"
+        },
+        {
+          "const": "route",
+          "description": "Nothing: the requests of the route count together.",
+          "type": "string"
+        }
+      ]
+    },
     "Redirect": {
       "additionalProperties": false,
       "description": "An answer that sends the client elsewhere.",
@@ -738,6 +800,15 @@
             "null"
           ]
         },
+        "concurrency_limit": {
+          "description": "The most requests of the route in progress at once; more are answered with 503 right\naway.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "listeners": {
           "description": "HTTP listeners whose requests the route sees. Without it, every HTTP listener.",
           "items": {
@@ -754,10 +825,29 @@
           ],
           "description": "Which requests the route takes. Without it, every request."
         },
+        "max_body_size": {
+          "description": "The largest request body, such as `\"10MiB\"`; larger ones are answered with 413. Without\nit, any size.",
+          "pattern": "^[0-9]+(B|KiB|MiB|GiB)$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "priority": {
           "description": "Precedence over the other routes that match a request: higher first. Default: 0.",
           "format": "int32",
           "type": "integer"
+        },
+        "rate_limit": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RateLimit"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How many requests each client, or another key, may make per period, such as\n`{ requests = 100, per = \"1s\" }`; more are answered with 429."
         },
         "redirect": {
           "anyOf": [

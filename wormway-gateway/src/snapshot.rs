@@ -26,7 +26,9 @@ const MAX_TARGETS: usize = u16::MAX as usize;
 pub(crate) struct GatewaySnapshot {
     /// The router of each HTTP listener.
     routers: HashMap<Name, Router<Arc<CompiledRoute>>>,
-    /// Routes by name. The next compilation keeps the traffic windows of those it still has.
+    /// Routes by name. The next compilation keeps the traffic windows and the counts of
+    /// requests in progress of those it still has, and their rate limits whose settings stay
+    /// the same.
     routes: BTreeMap<Name, Arc<CompiledRoute>>,
     /// Upstreams by name. The next compilation reuses the runtimes whose targets, balancing and
     /// health checks stay the same, and keeps the traffic windows of those it still has.
@@ -109,11 +111,8 @@ impl GatewaySnapshot {
 
         let mut routes = Vec::new();
         for (name, route) in &config.routes {
-            let stats = self
-                .routes
-                .get(name)
-                .map_or_else(Arc::default, |running| running.stats.clone());
-            match CompiledRoute::new(name, route, &upstreams, stats) {
+            let running = self.routes.get(name).map(|running| &**running);
+            match CompiledRoute::new(name, route, &upstreams, running) {
                 Ok(compiled) => routes.push((route, Arc::new(compiled))),
                 Err(issue) => issues.push(issue),
             }
@@ -396,6 +395,51 @@ mod tests {
             found.upstream().unwrap(),
             &second.upstreams["app"]
         ));
+    }
+
+    /// A route keeps its count of requests in progress, and its rate limit while the settings
+    /// of the rate limit stay the same.
+    #[tokio::test]
+    async fn keeps_route_limits_across_changes() {
+        let limited = BASE.replace(
+            "upstream = \"app\"\n",
+            "upstream = \"app\"\nrate_limit = { requests = 2, per = \"1m\" }\nconcurrency_limit = 5\n",
+        );
+        let first = GatewaySnapshot::default()
+            .compile(&parse(&limited), &files(), &prober())
+            .await
+            .unwrap();
+        let unrelated = limited.replace("concurrency_limit = 5", "concurrency_limit = 6");
+        let second = first
+            .compile(&parse(&unrelated), &files(), &prober())
+            .await
+            .unwrap();
+        let (one, two) = (&first.routes["app"], &second.routes["app"]);
+        assert!(Arc::ptr_eq(
+            one.rate_limit.as_ref().unwrap(),
+            two.rate_limit.as_ref().unwrap()
+        ));
+        assert!(Arc::ptr_eq(&one.inflight, &two.inflight));
+        assert_eq!(two.concurrency_limit, Some(6));
+
+        let changed = unrelated.replace("requests = 2", "requests = 3");
+        let third = second
+            .compile(&parse(&changed), &files(), &prober())
+            .await
+            .unwrap();
+        let three = &third.routes["app"];
+        assert!(!Arc::ptr_eq(
+            two.rate_limit.as_ref().unwrap(),
+            three.rate_limit.as_ref().unwrap()
+        ));
+        assert!(Arc::ptr_eq(&two.inflight, &three.inflight));
+
+        let fourth = third
+            .compile(&parse(BASE), &files(), &prober())
+            .await
+            .unwrap();
+        let four = &fourth.routes["app"];
+        assert!(four.rate_limit.is_none() && four.concurrency_limit.is_none());
     }
 
     /// A host name that does not resolve rejects the configuration, at its target.

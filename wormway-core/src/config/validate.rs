@@ -207,6 +207,36 @@ fn check_routes(config: &Config, issues: &mut Vec<Issue>) {
         }
         check_action(config, name, route, issues);
         check_modifiers(name, route, issues);
+        check_limits(name, route, issues);
+    }
+}
+
+/// The limits of the route let some requests through, and the body size limit comes with an
+/// upstream, which reads the body.
+fn check_limits(name: &Name, route: &Route, issues: &mut Vec<Issue>) {
+    if let Some(limit) = &route.rate_limit {
+        let at = format!("routes.{name}.rate_limit");
+        if limit.requests == 0 {
+            issues.push(Issue::new(format!("{at}.requests"), "must be at least 1"));
+        }
+        if limit.per.get().is_zero() {
+            issues.push(Issue::new(format!("{at}.per"), "must be longer than 0s"));
+        }
+    }
+    if route.concurrency_limit == Some(0) {
+        issues.push(Issue::new(
+            format!("routes.{name}.concurrency_limit"),
+            "must be at least 1",
+        ));
+    }
+    if let Some(size) = route.max_body_size {
+        let at = format!("routes.{name}.max_body_size");
+        if route.upstream.is_none() {
+            issues.push(Issue::new(&at, "only for routes with an upstream"));
+        }
+        if size.bytes() == 0 {
+            issues.push(Issue::new(&at, "must be at least 1B"));
+        }
     }
 }
 
@@ -1048,5 +1078,45 @@ mod tests {
 
         let file_mode = format!("{text}\n[config]\nsource = \"file\"\n");
         assert!(warnings(&parse(&file_mode)).is_empty());
+    }
+
+    /// Limits must let some requests through, and a body size limit needs an upstream.
+    #[test]
+    fn checks_limits() {
+        let config = parse(
+            r#"
+            version = 1
+            [routes.api]
+            upstream = "app"
+            rate_limit = { requests = 100, per = "1s", key = { header = "X-Tenant" } }
+            concurrency_limit = 10
+            max_body_size = "10MiB"
+            [routes.closed]
+            upstream = "app"
+            rate_limit = { requests = 0, per = "0s" }
+            concurrency_limit = 0
+            max_body_size = "0B"
+            [routes.fixed]
+            respond = { status = 204 }
+            rate_limit = { requests = 1, per = "1m", key = "route" }
+            concurrency_limit = 1
+            max_body_size = "1KiB"
+            [upstreams.app]
+            targets = ["127.0.0.1:9000"]
+            "#,
+        );
+        let issues = errors(&config);
+        assert_eq!(
+            paths(&issues),
+            [
+                "routes.closed.rate_limit.requests",
+                "routes.closed.rate_limit.per",
+                "routes.closed.concurrency_limit",
+                "routes.closed.max_body_size",
+                "routes.fixed.max_body_size",
+            ]
+        );
+        assert_eq!(issues[3].message, "must be at least 1B");
+        assert_eq!(issues[4].message, "only for routes with an upstream");
     }
 }

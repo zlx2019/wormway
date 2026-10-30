@@ -12,6 +12,8 @@ const REQUESTS_TOTAL: &str = "wormway_http_requests_total";
 const REQUEST_DURATION: &str = "wormway_http_request_duration_seconds";
 /// Attempts at the targets of the upstreams, by upstream and result.
 const UPSTREAM_REQUESTS_TOTAL: &str = "wormway_upstream_requests_total";
+/// Requests turned away by the rate limit of their route, by route.
+const RATE_LIMITED_TOTAL: &str = "wormway_rate_limited_total";
 
 /// Registers the help text of every gateway metric.
 pub(crate) fn describe() {
@@ -26,6 +28,10 @@ pub(crate) fn describe() {
     describe_counter!(
         UPSTREAM_REQUESTS_TOTAL,
         "Attempts at the targets of the upstreams, retries included, by upstream and result: ok, or timeout or error when the target failed."
+    );
+    describe_counter!(
+        RATE_LIMITED_TOTAL,
+        "Requests answered with 429 because the rate limit of their route was reached, by route."
     );
 }
 
@@ -48,4 +54,9 @@ pub(crate) fn request(listener: &Name, route: Option<&Name>, status: u16, durati
 pub(crate) fn attempt(upstream: &Name, result: &'static str) {
     counter!(UPSTREAM_REQUESTS_TOTAL, "upstream" => upstream.to_string(), "result" => result)
         .increment(1);
+}
+
+/// Counts a request of `route` that its rate limit turned away.
+pub(crate) fn rate_limited(route: &Name) {
+    counter!(RATE_LIMITED_TOTAL, "route" => route.to_string()).increment(1);
 }

@@ -76,6 +76,11 @@ request_headers = { remove = ["X-Debug"], set = { "X-Env" = "prod" }, add = { "X
 response_headers = { set = { "Strict-Transport-Security" = "max-age=63072000" } }
 compress = true                          # gzip, br or zstd, the first the client accepts
 timeouts = { read = "5m" }               # read and write, in place of those of the upstream
+# Each client may send 100 requests at once and gets them back evenly over the second; more get
+# 429 with Retry-After. key: "client_ip" (default), "route" (all together) or { header = "X-Tenant" }.
+rate_limit = { requests = 100, per = "1s", key = "client_ip" }
+concurrency_limit = 500                  # more requests in progress get 503 right away
+max_body_size = "10MiB"                  # B, KiB, MiB or GiB; larger bodies get 413
 
 # Instead of an upstream, a route can answer with a redirect, where {host} and {uri} come from
 # the request (status 301, 302, 303, 307 or 308, default 302), or with a fixed response.
