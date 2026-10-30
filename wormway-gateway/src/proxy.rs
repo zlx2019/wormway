@@ -23,6 +23,7 @@ use crate::headers::{self, HeaderEdits, RequestId};
 use crate::probe::describe;
 use crate::route::{CompiledRoute, FixedResponse, Handler, RedirectTarget};
 use crate::snapshot::GatewaySnapshot;
+use crate::telemetry;
 use crate::upstream::{CompiledUpstream, Inflight};
 
 /// Serves the requests of one listener.
@@ -64,6 +65,8 @@ pub(crate) struct RequestContext {
     inflight: Option<Inflight>,
     /// Whether the current target sent its response header.
     answered: bool,
+    /// Whether the metrics counted the current attempt already: one that failed to connect.
+    counted: bool,
 }
 
 impl Proxy {
@@ -120,6 +123,7 @@ impl ProxyHttp for Proxy {
             retries: 0,
             inflight: None,
             answered: false,
+            counted: false,
         }
     }
 
@@ -185,15 +189,16 @@ impl ProxyHttp for Proxy {
         };
         ctx.inflight = upstream.runtime.track(&target);
         ctx.answered = false;
+        ctx.counted = false;
         ctx.upstream_started.get_or_insert_with(Instant::now);
         let peer = upstream.peer(&target, &route.timeouts);
         ctx.tried.push(target);
         Ok(Box::new(peer))
     }
 
-    /// Counts the failure for the passive health checks, then tries another target, as many
-    /// times as the upstream allows and as long as there is a target the request has not
-    /// tried. Nothing was sent, so this is safe for every method.
+    /// Counts the failure for the passive health checks and the metrics, then tries another
+    /// target, as many times as the upstream allows and as long as there is a target the
+    /// request has not tried. Nothing was sent, so this is safe for every method.
     fn fail_to_connect(
         &self,
         session: &mut Session,
@@ -211,6 +216,8 @@ impl ProxyHttp for Proxy {
             return e;
         };
         upstream.runtime.failed(target, &e);
+        telemetry::attempt(upstream.name(), attempt_result(Some(&e)));
+        ctx.counted = true;
         if ctx.retries >= upstream.retries() {
             return e;
         }
@@ -305,8 +312,11 @@ impl ProxyHttp for Proxy {
         Ok(())
     }
 
-    /// Logs the request if it failed, and writes its line to the access log unless its route
-    /// leaves it out.
+    /// Logs the request if it failed, counts it and its last attempt at a target in the
+    /// metrics, and writes its line to the access log unless its route leaves it out. Attempts
+    /// retried after they had connected are not counted: Pingora retries those only when the
+    /// target did not take the request, such as over a reused connection that turned out
+    /// closed, or on an HTTP/2 stream it refused.
     async fn logging(
         &self,
         session: &mut Session,
@@ -314,13 +324,27 @@ impl ProxyHttp for Proxy {
         ctx: &mut RequestContext,
     ) {
         let status = response_status(session);
+        let duration = ctx.started.elapsed();
         if let Some(error) = error {
             self.log_failure(error, ctx, status);
         }
-        if let Some(access_log) = &self.access_log
-            && ctx.route.as_ref().is_none_or(|route| route.access_log)
+        let route = ctx.route.as_ref();
+        telemetry::request(
+            &self.listener,
+            route.map(|route| &route.name),
+            status,
+            duration,
+        );
+        if !ctx.counted
+            && !ctx.tried.is_empty()
+            && let Some(upstream) = route.and_then(|route| route.upstream())
         {
-            access_log.write(self.record(session, error, ctx, status));
+            telemetry::attempt(upstream.name(), attempt_result(error));
+        }
+        if let Some(access_log) = &self.access_log
+            && route.is_none_or(|route| route.access_log)
+        {
+            access_log.write(self.record(session, error, ctx, status, duration));
         }
     }
 
@@ -421,14 +445,15 @@ impl Proxy {
         }
     }
 
-    /// Returns the access log line of a request that ended with `status`, and with `error` if
-    /// it failed.
+    /// Returns the access log line of a request that ended with `status` after `duration`, and
+    /// with `error` if it failed.
     fn record(
         &self,
         session: &Session,
         error: Option<&Error>,
         ctx: &RequestContext,
         status: u16,
+        duration: Duration,
     ) -> Record {
         let request = session.req_header();
         let header = |name: &str| {
@@ -456,7 +481,7 @@ impl Proxy {
             status,
             request_bytes: session.body_bytes_read(),
             response_bytes: session.body_bytes_sent(),
-            duration: ctx.started.elapsed(),
+            duration,
             listener: self.listener.clone(),
             route: ctx.route.as_ref().map(|route| route.name.clone()),
             upstream: ctx
@@ -589,6 +614,17 @@ fn error_status(e: &Error) -> u16 {
         ) => 0,
         (_, ErrorSource::Downstream) => 400,
         (_, ErrorSource::Internal | ErrorSource::Unset) => 500,
+    }
+}
+
+/// Returns the result of an attempt at a target that ended with `error`, if any, for the
+/// metrics: `timeout` or `error` when the target failed, as 504 or 502 answer it, otherwise
+/// `ok`.
+fn attempt_result(error: Option<&Error>) -> &'static str {
+    match error {
+        Some(e) if *e.esource() == ErrorSource::Upstream && error_status(e) == 504 => "timeout",
+        Some(e) if *e.esource() == ErrorSource::Upstream => "error",
+        _ => "ok",
     }
 }
 

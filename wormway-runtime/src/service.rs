@@ -13,6 +13,7 @@ use wormway_core::config::{Listener, Name, Protocol};
 
 use crate::engine::Engine;
 use crate::health::HealthReport;
+use crate::tls::TlsReport;
 
 /// A boxed future, as returned by [`Service`] and [`Engine`] methods.
 pub type BoxFuture<'a, T = ()> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -55,8 +56,9 @@ pub trait ServiceFactory: Send + Sync + 'static {
     fn create(&self, name: &Name, listener: &Listener) -> Result<Arc<dyn Service>, BoxError>;
 }
 
-/// Service factories by protocol, the engines that build their shared state, and the report
-/// of the health of the upstreams. A listener whose protocol has no factory is rejected.
+/// Service factories by protocol, the engines that build their shared state, and the reports
+/// of the health of the upstreams and of the certificates. A listener whose protocol has no
+/// factory is rejected.
 #[derive(Default)]
 pub struct Services {
     /// The factory of each available protocol.
@@ -65,6 +67,8 @@ pub struct Services {
     engines: Vec<Arc<dyn Engine>>,
     /// Reports the health of the upstreams, if a service has upstreams.
     health: Option<Arc<dyn HealthReport>>,
+    /// Reports the certificates in effect, if a service has certificates.
+    tls: Option<Arc<dyn TlsReport>>,
 }
 
 impl Services {
@@ -88,6 +92,11 @@ impl Services {
         self.health = Some(Arc::new(report));
     }
 
+    /// Sets the report of the certificates in effect, replacing any previous one.
+    pub fn set_tls_report(&mut self, report: impl TlsReport) {
+        self.tls = Some(Arc::new(report));
+    }
+
     /// Returns the factory of `protocol`.
     pub(crate) fn get(&self, protocol: Protocol) -> Option<&Arc<dyn ServiceFactory>> {
         self.factories.get(&protocol)
@@ -96,6 +105,11 @@ impl Services {
     /// Returns the report of the health of the upstreams, if any.
     pub(crate) fn health_report(&self) -> Option<&Arc<dyn HealthReport>> {
         self.health.as_ref()
+    }
+
+    /// Returns the report of the certificates in effect, if any.
+    pub(crate) fn tls_report(&self) -> Option<&Arc<dyn TlsReport>> {
+        self.tls.as_ref()
     }
 
     /// Returns the engines in the order they were added.

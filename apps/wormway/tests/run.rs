@@ -68,6 +68,9 @@ fn write_certificate(dir: &Path, file: &str) {
 /// code and the body.
 fn get(addr: &str, path: &str, token: Option<&str>) -> (u16, String) {
     let mut stream = TcpStream::connect(addr).expect("connect to the Admin API");
+    stream
+        .set_read_timeout(Some(PATIENCE))
+        .expect("set the read timeout");
     let authorization = token
         .map(|token| format!("Authorization: Bearer {token}\r\n"))
         .unwrap_or_default();
@@ -421,6 +424,170 @@ fn reports_the_health_of_upstreams() {
         Some(r#""unhealthy" "connection refused""#),
         "{body}"
     );
+    wormway.signal("TERM");
+    assert_eq!(wormway.exit_code(), Some(0));
+}
+
+/// Starts a server on a free loopback port that accepts connections and never answers, and
+/// returns its address.
+fn silent_upstream() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind the upstream");
+    let addr = listener.local_addr().expect("upstream address");
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for stream in listener.incoming().map_while(Result::ok) {
+            held.push(stream);
+        }
+    });
+    addr
+}
+
+/// Returns a loopback address where nothing listens.
+fn closed_port() -> SocketAddr {
+    TcpListener::bind("127.0.0.1:0")
+        .and_then(|listener| listener.local_addr())
+        .expect("a free port")
+}
+
+/// Scrapes the metrics from the Admin API at `addr` until they contain every line of
+/// `expected`, and returns them. Requests are counted when they end, which can be just after
+/// their response arrived.
+fn metrics_with(addr: &str, token: &str, expected: &[String]) -> String {
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        let (status, body) = get(addr, "/metrics", Some(token));
+        assert_eq!(status, 200, "{body}");
+        if expected
+            .iter()
+            .all(|line| body.lines().any(|seen| seen == line))
+        {
+            return body;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "missing some of {expected:#?} in:\n{body}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// The metrics count requests by listener, route and status, and attempts at targets by
+/// upstream and result, retries included, but not requests without a usable target; durations
+/// go into buckets. The health of every target and the expiry of every certificate come from
+/// the state in effect.
+#[test]
+fn exports_metrics() {
+    let (target, closed, refused) = (upstream("hello"), closed_port(), closed_port());
+    let silent = silent_upstream();
+    let config = format!(
+        r#"{EMPTY}
+[listeners.web]
+listen = ["127.0.0.1:0"]
+protocol = "http"
+[routes.app]
+match = {{ paths = ["/app"] }}
+upstream = "app"
+[routes.broken]
+match = {{ paths = ["/broken"] }}
+upstream = "broken"
+[routes.slow]
+match = {{ paths = ["/slow"] }}
+upstream = "slow"
+[routes.flaky]
+match = {{ paths = ["/flaky"] }}
+upstream = "flaky"
+[routes.down]
+match = {{ paths = ["/down"] }}
+upstream = "down"
+[upstreams.app]
+targets = ["{target}", "{closed}"]
+health_check = {{ kind = "tcp", interval = "1h" }}
+[upstreams.broken]
+targets = ["{closed}", "{refused}"]
+retries = 1
+[upstreams.slow]
+targets = ["{silent}"]
+timeouts = {{ read = "200ms" }}
+[upstreams.flaky]
+targets = ["{closed}", "{target}"]
+[upstreams.down]
+targets = ["{refused}"]
+health_check = {{ kind = "tcp", interval = "1h" }}
+[certificates.site]
+cert = "site.crt"
+key = "site.key"
+"#
+    );
+    let path = temp_config("run-metrics", &config);
+    write_certificate(path.parent().expect("directory"), "site");
+    let mut wormway = Wormway::start_with_env(&path, &[("WORMWAY_ADMIN_TOKEN", "metrics-token")]);
+    let web = wormway.listener_addr("web");
+    let admin = wormway.admin_addr();
+    wormway.wait_for("Wormway is ready");
+
+    assert_eq!(get(&web, "/app", None).0, 200);
+    assert_eq!(get(&web, "/none", None).0, 404);
+    assert_eq!(get(&web, "/broken", None).0, 502);
+    assert_eq!(get(&web, "/slow", None).0, 504);
+    assert_eq!(get(&web, "/down", None).0, 503);
+    // Round robin sends at least one of the two to the closed port first, then retries.
+    assert_eq!(get(&web, "/flaky", None).0, 200);
+    assert_eq!(get(&web, "/flaky", None).0, 200);
+
+    let requests = |route: &str, status| {
+        format!(
+            r#"wormway_http_requests_total{{listener="web",route="{route}",status="{status}"}} 1"#
+        )
+    };
+    let attempts = |upstream: &str, result: &str, count| {
+        format!(
+            r#"wormway_upstream_requests_total{{upstream="{upstream}",result="{result}"}} {count}"#
+        )
+    };
+    let healthy = |upstream: &str, target: SocketAddr, value| {
+        format!(
+            r#"wormway_upstream_target_healthy{{upstream="{upstream}",target="{target}"}} {value}"#
+        )
+    };
+    let expected = [
+        requests("app", 200),
+        requests("", 404),
+        requests("broken", 502),
+        requests("slow", 504),
+        requests("down", 503),
+        attempts("app", "ok", 1),
+        attempts("broken", "error", 2),
+        attempts("slow", "timeout", 1),
+        attempts("flaky", "ok", 2),
+        r#"wormway_http_request_duration_seconds_bucket{route="slow",le="0.1"} 0"#.to_owned(),
+        r#"wormway_http_request_duration_seconds_count{route="slow"} 1"#.to_owned(),
+        healthy("app", target, 1),
+        healthy("app", closed, 0),
+        healthy("broken", refused, 1),
+    ];
+    let body = metrics_with(&admin, "metrics-token", &expected);
+    let expiry = body
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix(
+                r#"wormway_certificate_expiry_timestamp_seconds{certificate="site"} "#,
+            )
+        })
+        .and_then(|seconds| seconds.parse::<u64>().ok());
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("time")
+        .as_secs();
+    assert!(expiry.is_some_and(|expiry| expiry > now), "{body}");
+    assert!(
+        !body.contains(r#"wormway_upstream_requests_total{upstream="down""#),
+        "{body}"
+    );
+    assert!(
+        body.contains("# HELP wormway_upstream_requests_total "),
+        "{body}"
+    );
+
     wormway.signal("TERM");
     assert_eq!(wormway.exit_code(), Some(0));
 }

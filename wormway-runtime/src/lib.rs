@@ -4,7 +4,8 @@
 //!
 //! Protocols plug in through [`ServiceFactory`], and state shared by their services, such as a
 //! routing table, through [`Engine`]; [`Server`] runs the listeners of a configuration and
-//! applies new ones. A [`HealthReport`] tells how the targets of the upstreams are doing.
+//! applies new ones. A [`HealthReport`] tells how the targets of the upstreams are doing, and a
+//! [`TlsReport`] which certificates are in effect.
 
 mod engine;
 mod health;
@@ -14,9 +15,11 @@ mod service;
 mod snapshot;
 mod socket;
 mod telemetry;
+mod tls;
 
 pub use engine::{Engine, Staged};
 pub use health::{HealthReport, TargetReport, TargetState, UpstreamReport};
 pub use server::{ApplyError, Prepared, Server};
 pub use service::{BoxError, BoxFuture, Connection, Service, ServiceFactory, Services, Shutdown};
 pub use snapshot::Snapshot;
+pub use tls::{CertificateReport, TlsReport};

@@ -13,6 +13,7 @@ use wormway_core::time::rfc3339;
 use wormway_runtime::{TargetReport, TargetState, UpstreamReport};
 
 use super::Admin;
+use crate::prometheus;
 
 /// What `GET /api/v1/status` reports.
 #[derive(Serialize)]
@@ -167,13 +168,17 @@ pub(crate) async fn upstreams(State(admin): State<Arc<Admin>>) -> Json<Upstreams
     Json(UpstreamsResponse { upstreams })
 }
 
-/// `GET /metrics`: metrics in the Prometheus text format.
+/// `GET /metrics`: metrics in the Prometheus text format, with the state of the upstreams and
+/// the certificates as it is now.
 pub(crate) async fn metrics(State(admin): State<Arc<Admin>>) -> impl IntoResponse {
+    let mut text = admin.metrics.render();
+    let (upstreams, certificates) = (admin.server.upstreams(), admin.server.certificates());
+    prometheus::write_state(&mut text, &upstreams, &certificates);
     (
         [(
             header::CONTENT_TYPE,
             "text/plain; version=0.0.4; charset=utf-8",
         )],
-        admin.metrics.render(),
+        text,
     )
 }

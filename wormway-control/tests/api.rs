@@ -16,8 +16,8 @@ use tower::ServiceExt;
 use wormway_control::{Admin, AdminToken, Metrics, Store};
 use wormway_core::config::{Config, HealthCheckKind, Listener, Name, Protocol};
 use wormway_runtime::{
-    BoxError, BoxFuture, Connection, HealthReport, Server, Service, ServiceFactory, Services,
-    Shutdown, TargetReport, TargetState, UpstreamReport,
+    BoxError, BoxFuture, CertificateReport, Connection, HealthReport, Server, Service,
+    ServiceFactory, Services, Shutdown, TargetReport, TargetState, TlsReport, UpstreamReport,
 };
 
 /// Token of the Admin API in these tests.
@@ -95,6 +95,23 @@ impl HealthReport for Report {
     }
 }
 
+/// Reports two certificates that expire at fixed times.
+struct Tls;
+
+impl TlsReport for Tls {
+    /// Returns the same certificates every time.
+    fn certificates(&self) -> Vec<CertificateReport> {
+        let certificate = |name: &str, expiry| CertificateReport {
+            name: name.parse().expect("name"),
+            not_after: UNIX_EPOCH + Duration::from_secs(expiry),
+        };
+        vec![
+            certificate("example", 1_793_000_000),
+            certificate("wildcard", 1_800_000_000),
+        ]
+    }
+}
+
 /// A server and its Admin API on a fresh database.
 struct Harness {
     /// Routes of the Admin API.
@@ -122,6 +139,7 @@ impl Harness {
         let mut services = Services::new();
         services.register(Protocol::Http, Hello);
         services.set_health_report(Report);
+        services.set_tls_report(Tls);
         let text = format!("version = 1\n[config]\nsource = \"{source}\"\n");
         let mut config = Config::from_toml(&text).expect("configuration");
         if let Some((_, dynamic)) = store.latest_version().await.expect("latest version") {
@@ -256,6 +274,34 @@ async fn requires_the_token() {
             .unwrap()
             .starts_with("text/plain")
     );
+}
+
+/// The metrics end with the state in effect, as the reports tell it at the scrape: whether each
+/// target gets requests, and when each certificate expires.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn exports_the_state_as_metrics() {
+    let harness = Harness::start("db").await;
+    let request = Request::get("/metrics").header(header::AUTHORIZATION, format!("Bearer {TOKEN}"));
+    let (status, _, body) = harness.send(request.body(Body::empty()).unwrap()).await;
+    assert_eq!(status, StatusCode::OK);
+    let lines: Vec<&str> = body
+        .lines()
+        .filter(|line| !line.starts_with("# HELP "))
+        .collect();
+    let expected = [
+        "# TYPE wormway_upstream_target_healthy gauge",
+        r#"wormway_upstream_target_healthy{upstream="app",target="10.0.0.1:80"} 1"#,
+        r#"wormway_upstream_target_healthy{upstream="app",target="10.0.0.2:80"} 0"#,
+        r#"wormway_upstream_target_healthy{upstream="app",target="[::1]:80"} 0"#,
+        r#"wormway_upstream_target_healthy{upstream="plain",target="10.0.0.3:80"} 1"#,
+        "",
+        "# TYPE wormway_certificate_expiry_timestamp_seconds gauge",
+        r#"wormway_certificate_expiry_timestamp_seconds{certificate="example"} 1793000000"#,
+        r#"wormway_certificate_expiry_timestamp_seconds{certificate="wildcard"} 1800000000"#,
+        "",
+    ];
+    assert_eq!(lines, expected, "{body}");
+    assert_eq!(body.matches("# HELP ").count(), 2, "{body}");
 }
 
 /// The status reports the version, the configuration and the listeners.

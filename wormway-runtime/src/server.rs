@@ -20,6 +20,7 @@ use crate::service::{BoxError, ServiceFactory, Services};
 use crate::snapshot::Snapshot;
 use crate::socket::{self, Bound, Socket};
 use crate::telemetry;
+use crate::tls::CertificateReport;
 
 /// Runs the listeners of a configuration and switches to new configurations without dropping
 /// connections.
@@ -167,6 +168,14 @@ impl Server {
         self.services
             .health_report()
             .map(|report| report.upstreams())
+            .unwrap_or_default()
+    }
+
+    /// Returns the certificates in effect; none without a certificate report.
+    pub fn certificates(&self) -> Vec<CertificateReport> {
+        self.services
+            .tls_report()
+            .map(|report| report.certificates())
             .unwrap_or_default()
     }
 

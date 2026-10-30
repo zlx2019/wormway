@@ -16,6 +16,7 @@ mod resolve;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
+use std::time::{Duration, UNIX_EPOCH};
 
 use arc_swap::ArcSwap;
 use rustls::ServerConfig;
@@ -23,7 +24,7 @@ use rustls::crypto::CryptoProvider;
 use rustls::pki_types::CertificateDer;
 use rustls::server::ServerSessionMemoryCache;
 use wormway_core::config::{Issue, Name};
-use wormway_runtime::Services;
+use wormway_runtime::{CertificateReport, Services, TlsReport};
 
 use crate::engine::Loader;
 pub use crate::load::{CertificateInfo, ClientCertificate};
@@ -52,9 +53,10 @@ impl Certificates {
     }
 
     /// Registers the engine that loads the certificates of every configuration with
-    /// `services`.
+    /// `services`, and the report of the certificates in effect.
     pub fn register(&self, services: &mut Services) {
         services.add_engine(Loader::new(self.base.clone(), self.snapshot.clone()));
+        services.set_tls_report(self.clone());
     }
 
     /// Builds the rustls settings of TLS listener `listener`, which offers the application
@@ -109,6 +111,20 @@ impl Certificates {
             .certificates
             .iter()
             .map(|(name, loaded)| (name.clone(), loaded.info.clone()))
+            .collect()
+    }
+}
+
+impl TlsReport for Certificates {
+    /// Returns the certificates in effect, in name order. Validity before 1970 counts as 1970.
+    fn certificates(&self) -> Vec<CertificateReport> {
+        self.details()
+            .into_iter()
+            .map(|(name, info)| CertificateReport {
+                name,
+                not_after: UNIX_EPOCH
+                    + Duration::from_secs(u64::try_from(info.not_after).unwrap_or(0)),
+            })
             .collect()
     }
 }

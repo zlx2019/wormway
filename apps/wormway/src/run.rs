@@ -148,6 +148,7 @@ async fn serve(setup: Setup, data_plane: Handle) -> anyhow::Result<ExitCode> {
     let workers = data_plane.metrics().num_workers();
     let services = services(workers, load::config_dir(&path), access_log.clone());
     let server = Arc::new(Server::start(data_plane, services, config).await?);
+    tokio::spawn(metrics.clone().keep_up());
     let admin = Admin::new(server.clone(), store.clone(), token, metrics).await?;
     let listener = TcpListener::bind(admin_addr)
         .await
