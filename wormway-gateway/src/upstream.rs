@@ -23,6 +23,7 @@ use wormway_core::config::{
 use wormway_runtime::{TargetReport, TargetState, UpstreamReport};
 
 use crate::health::{UpstreamHealth, Watch};
+use crate::stats::Window;
 use crate::upstream_tls::PeerTls;
 
 /// How many targets a selection may look at before it gives up.
@@ -48,14 +49,18 @@ pub(crate) struct CompiledUpstream {
     retries: u32,
     /// How requests reach the targets.
     connect: Arc<Connect>,
+    /// The traffic of the routes to the upstream, kept while the upstream keeps its name.
+    pub(crate) stats: Arc<Window>,
 }
 
 impl CompiledUpstream {
-    /// Puts the settings of `upstream` on `runtime`, reaching the targets through `connect`.
+    /// Puts the settings of `upstream` on `runtime`, reaching the targets through `connect`
+    /// and counting the traffic in `stats`.
     pub(crate) fn new(
         runtime: Arc<UpstreamRuntime>,
         upstream: &Upstream,
         connect: Arc<Connect>,
+        stats: Arc<Window>,
     ) -> Self {
         Self {
             runtime,
@@ -63,6 +68,7 @@ impl CompiledUpstream {
             timeouts: upstream.timeouts,
             retries: upstream.retries(),
             connect,
+            stats,
         }
     }
 

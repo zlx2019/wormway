@@ -9,6 +9,7 @@ use wormway_core::config::{
 };
 
 use crate::headers::HeaderEdits;
+use crate::stats::Window;
 use crate::upstream::CompiledUpstream;
 
 /// A route ready to serve requests.
@@ -29,6 +30,8 @@ pub(crate) struct CompiledRoute {
     pub(crate) timeouts: RouteTimeouts,
     /// Whether the requests go to the access log.
     pub(crate) access_log: bool,
+    /// The traffic of the route, kept while the route keeps its name.
+    pub(crate) stats: Arc<Window>,
 }
 
 /// What a route does with a request.
@@ -42,12 +45,14 @@ pub(crate) enum Handler {
 }
 
 impl CompiledRoute {
-    /// Compiles route `name`, with its upstream from `upstreams`. The route passed validation,
-    /// so this fails only if the validation rules miss a case.
+    /// Compiles route `name`, with its upstream from `upstreams`, counting its traffic in
+    /// `stats`. The route passed validation, so this fails only if the validation rules miss a
+    /// case.
     pub(crate) fn new(
         name: &Name,
         route: &Route,
         upstreams: &BTreeMap<Name, Arc<CompiledUpstream>>,
+        stats: Arc<Window>,
     ) -> Result<Self, Issue> {
         let at = |field: &str| format!("routes.{name}{field}");
         let handler = match route.action() {
@@ -81,6 +86,7 @@ impl CompiledRoute {
             compress: route.compress(),
             timeouts: route.timeouts,
             access_log: route.access_log(),
+            stats,
         })
     }
 

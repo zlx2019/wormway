@@ -19,6 +19,7 @@ use crate::host::Host;
 use crate::service::{BoxError, ServiceFactory, Services};
 use crate::snapshot::Snapshot;
 use crate::socket::{self, Bound, Socket};
+use crate::stats::TrafficReport;
 use crate::telemetry;
 use crate::tls::CertificateReport;
 
@@ -177,6 +178,11 @@ impl Server {
             .tls_report()
             .map(|report| report.certificates())
             .unwrap_or_default()
+    }
+
+    /// Returns the traffic of the last minute, if a service counts it.
+    pub fn traffic(&self) -> Option<TrafficReport> {
+        self.services.stats_report().map(|report| report.traffic())
     }
 
     /// Stops accepting on every listener and drains every service. Connections still open when

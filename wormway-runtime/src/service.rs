@@ -13,6 +13,7 @@ use wormway_core::config::{Listener, Name, Protocol};
 
 use crate::engine::Engine;
 use crate::health::HealthReport;
+use crate::stats::StatsReport;
 use crate::tls::TlsReport;
 
 /// A boxed future, as returned by [`Service`] and [`Engine`] methods.
@@ -57,8 +58,8 @@ pub trait ServiceFactory: Send + Sync + 'static {
 }
 
 /// Service factories by protocol, the engines that build their shared state, and the reports
-/// of the health of the upstreams and of the certificates. A listener whose protocol has no
-/// factory is rejected.
+/// of the health of the upstreams, of the certificates and of the traffic. A listener whose
+/// protocol has no factory is rejected.
 #[derive(Default)]
 pub struct Services {
     /// The factory of each available protocol.
@@ -69,6 +70,8 @@ pub struct Services {
     health: Option<Arc<dyn HealthReport>>,
     /// Reports the certificates in effect, if a service has certificates.
     tls: Option<Arc<dyn TlsReport>>,
+    /// Reports the traffic of the last minute, if a service counts it.
+    stats: Option<Arc<dyn StatsReport>>,
 }
 
 impl Services {
@@ -97,6 +100,11 @@ impl Services {
         self.tls = Some(Arc::new(report));
     }
 
+    /// Sets the report of the traffic of the last minute, replacing any previous one.
+    pub fn set_stats_report(&mut self, report: impl StatsReport) {
+        self.stats = Some(Arc::new(report));
+    }
+
     /// Returns the factory of `protocol`.
     pub(crate) fn get(&self, protocol: Protocol) -> Option<&Arc<dyn ServiceFactory>> {
         self.factories.get(&protocol)
@@ -110,6 +118,11 @@ impl Services {
     /// Returns the report of the certificates in effect, if any.
     pub(crate) fn tls_report(&self) -> Option<&Arc<dyn TlsReport>> {
         self.tls.as_ref()
+    }
+
+    /// Returns the report of the traffic of the last minute, if any.
+    pub(crate) fn stats_report(&self) -> Option<&Arc<dyn StatsReport>> {
+        self.stats.as_ref()
     }
 
     /// Returns the engines in the order they were added.

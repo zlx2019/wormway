@@ -23,8 +23,8 @@ use crate::headers::{self, HeaderEdits, RequestId};
 use crate::probe::describe;
 use crate::route::{CompiledRoute, FixedResponse, Handler, RedirectTarget};
 use crate::snapshot::GatewaySnapshot;
-use crate::telemetry;
 use crate::upstream::{CompiledUpstream, Inflight};
+use crate::{stats, telemetry};
 
 /// Serves the requests of one listener.
 pub(crate) struct Proxy {
@@ -313,7 +313,8 @@ impl ProxyHttp for Proxy {
     }
 
     /// Logs the request if it failed, counts it and its last attempt at a target in the
-    /// metrics, and writes its line to the access log unless its route leaves it out. Attempts
+    /// metrics and in the traffic of the last minute, and writes its line to the access log
+    /// unless its route leaves it out. Attempts
     /// retried after they had connected are not counted: Pingora retries those only when the
     /// target did not take the request, such as over a reused connection that turned out
     /// closed, or on an HTTP/2 stream it refused.
@@ -341,6 +342,7 @@ impl ProxyHttp for Proxy {
         {
             telemetry::attempt(upstream.name(), attempt_result(error));
         }
+        count_traffic(ctx, status, duration);
         if let Some(access_log) = &self.access_log
             && route.is_none_or(|route| route.access_log)
         {
@@ -614,6 +616,21 @@ fn error_status(e: &Error) -> u16 {
         ) => 0,
         (_, ErrorSource::Downstream) => 400,
         (_, ErrorSource::Internal | ErrorSource::Unset) => 500,
+    }
+}
+
+/// Counts a request that ended with `status` after `duration` in the traffic of all requests,
+/// of its route and of the upstream of its route, the last with the time the upstream took.
+/// Statuses of 500 and above are errors.
+fn count_traffic(ctx: &RequestContext, status: u16, duration: Duration) {
+    let second = stats::second();
+    let error = status >= 500;
+    ctx.snapshot.all.record(second, error, Some(duration));
+    if let Some(route) = &ctx.route {
+        route.stats.record(second, error, Some(duration));
+        if let Some(upstream) = route.upstream() {
+            upstream.stats.record(second, error, ctx.upstream_duration);
+        }
     }
 }
 

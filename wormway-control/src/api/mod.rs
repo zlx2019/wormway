@@ -74,6 +74,7 @@ impl Admin {
         let protected = Router::new()
             .route("/api/v1/status", get(status::status))
             .route("/api/v1/status/upstreams", get(status::upstreams))
+            .route("/api/v1/stats", get(status::stats))
             .route("/api/v1/config", get(config::show).put(config::replace))
             .route("/api/v1/config/validate", post(config::validate))
             .route("/api/v1/config/versions", get(config::versions))

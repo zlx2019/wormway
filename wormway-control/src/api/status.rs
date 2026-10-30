@@ -1,7 +1,9 @@
-//! Health, status and metrics endpoints.
+//! Health, status, traffic and metrics endpoints.
 
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Json;
 use axum::extract::State;
@@ -10,9 +12,12 @@ use axum::response::IntoResponse;
 use serde::Serialize;
 use wormway_core::config::{ConfigSource, HealthCheckKind, Name, Protocol};
 use wormway_core::time::rfc3339;
-use wormway_runtime::{TargetReport, TargetState, UpstreamReport};
+use wormway_runtime::{
+    PeriodReport, SeriesReport, TargetReport, TargetState, TrafficReport, UpstreamReport,
+};
 
 use super::Admin;
+use super::error::ApiError;
 use crate::prometheus;
 
 /// What `GET /api/v1/status` reports.
@@ -122,6 +127,117 @@ impl From<TargetReport> for TargetStatus {
             reason: report.reason,
         }
     }
+}
+
+/// What `GET /api/v1/stats` reports: the requests of the last full seconds.
+#[derive(Serialize)]
+pub(crate) struct StatsResponse {
+    /// When the last of the seconds ended, as an RFC 3339 timestamp in UTC.
+    until: String,
+    /// Every request, those without a route included.
+    all: SeriesStats,
+    /// The requests of each route in effect, in name order.
+    routes: Vec<SeriesStats>,
+    /// The requests of the routes to each upstream in effect, in name order, with the time of
+    /// the upstream: from picking the first target to the response header of the last.
+    upstreams: Vec<SeriesStats>,
+}
+
+/// The requests of a route, an upstream or all of them: one entry per second in each array,
+/// the oldest first.
+#[derive(Serialize)]
+struct SeriesStats {
+    /// Name of the route or the upstream; absent for all requests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<Name>,
+    /// Requests that ended.
+    requests: Vec<u64>,
+    /// Those answered with status 500 or above, the answers of Wormway itself included.
+    errors: Vec<u64>,
+    /// The median duration, in seconds; `null` without any.
+    p50: Vec<Option<f64>>,
+    /// The duration that 99% of the requests stayed within, in seconds; `null` without any.
+    p99: Vec<Option<f64>>,
+    /// All the seconds together.
+    summary: PeriodStats,
+}
+
+/// The requests of a period, durations in seconds.
+#[derive(Serialize)]
+struct PeriodStats {
+    /// Requests that ended.
+    requests: u64,
+    /// Those answered with status 500 or above.
+    errors: u64,
+    /// The median duration; `null` without any.
+    p50: Option<f64>,
+    /// The duration that 99% of the requests stayed within; `null` without any.
+    p99: Option<f64>,
+}
+
+impl From<TrafficReport> for StatsResponse {
+    /// Takes the report of the gateway.
+    fn from(report: TrafficReport) -> Self {
+        let named = |series: BTreeMap<Name, SeriesReport>| {
+            series
+                .into_iter()
+                .map(|(name, series)| SeriesStats::new(Some(name), series))
+                .collect()
+        };
+        Self {
+            until: rfc3339(report.until),
+            all: SeriesStats::new(None, report.all),
+            routes: named(report.routes),
+            upstreams: named(report.upstreams),
+        }
+    }
+}
+
+impl SeriesStats {
+    /// Lays out `series` of `name` as one array per value.
+    fn new(name: Option<Name>, series: SeriesReport) -> Self {
+        let seconds = &series.seconds;
+        let in_seconds =
+            |duration: Option<Duration>| duration.map(|duration| duration.as_secs_f64());
+        Self {
+            name,
+            requests: seconds.iter().map(|second| second.requests).collect(),
+            errors: seconds.iter().map(|second| second.errors).collect(),
+            p50: seconds
+                .iter()
+                .map(|second| in_seconds(second.p50))
+                .collect(),
+            p99: seconds
+                .iter()
+                .map(|second| in_seconds(second.p99))
+                .collect(),
+            summary: PeriodStats::from(series.total),
+        }
+    }
+}
+
+impl From<PeriodReport> for PeriodStats {
+    /// Takes the durations in seconds.
+    fn from(period: PeriodReport) -> Self {
+        Self {
+            requests: period.requests,
+            errors: period.errors,
+            p50: period.p50.map(|duration| duration.as_secs_f64()),
+            p99: period.p99.map(|duration| duration.as_secs_f64()),
+        }
+    }
+}
+
+/// `GET /api/v1/stats`: the requests of the last minute, by second, all together, by route
+/// and by upstream; 404 when no service counts them.
+pub(crate) async fn stats(
+    State(admin): State<Arc<Admin>>,
+) -> Result<Json<StatsResponse>, ApiError> {
+    let report = admin
+        .server
+        .traffic()
+        .ok_or_else(|| ApiError::not_found("traffic statistics"))?;
+    Ok(Json(report.into()))
 }
 
 /// `GET /healthz`: answers while the process runs. It needs no token.

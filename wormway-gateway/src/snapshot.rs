@@ -13,6 +13,7 @@ use wormway_tls::Certificates;
 use crate::health::UpstreamHealth;
 use crate::probe::Prober;
 use crate::route::CompiledRoute;
+use crate::stats::Window;
 use crate::upstream::{self, CompiledUpstream, Connect, UpstreamRuntime};
 use crate::upstream_tls::PeerTls;
 
@@ -25,9 +26,13 @@ const MAX_TARGETS: usize = u16::MAX as usize;
 pub(crate) struct GatewaySnapshot {
     /// The router of each HTTP listener.
     routers: HashMap<Name, Router<Arc<CompiledRoute>>>,
+    /// Routes by name. The next compilation keeps the traffic windows of those it still has.
+    routes: BTreeMap<Name, Arc<CompiledRoute>>,
     /// Upstreams by name. The next compilation reuses the runtimes whose targets, balancing and
-    /// health checks stay the same.
+    /// health checks stay the same, and keeps the traffic windows of those it still has.
     upstreams: BTreeMap<Name, Arc<CompiledUpstream>>,
+    /// The traffic of all requests, kept by every next snapshot.
+    pub(crate) all: Arc<Window>,
 }
 
 impl GatewaySnapshot {
@@ -40,6 +45,16 @@ impl GatewaySnapshot {
         self.routers.get(listener)?.find(request)
     }
 
+    /// Returns the routes in name order.
+    pub(crate) fn routes(&self) -> impl Iterator<Item = &CompiledRoute> {
+        self.routes.values().map(|route| &**route)
+    }
+
+    /// Returns the upstreams in name order.
+    pub(crate) fn upstreams(&self) -> impl Iterator<Item = &CompiledUpstream> {
+        self.upstreams.values().map(|upstream| &**upstream)
+    }
+
     /// Returns the upstreams in name order, with the health of their targets.
     fn report(&self) -> Vec<UpstreamReport> {
         self.upstreams
@@ -49,7 +64,8 @@ impl GatewaySnapshot {
     }
 
     /// Compiles `config`, reusing the upstream runtimes of `self` whose targets, balancing and
-    /// health checks did not change. The TLS files of upstreams are read again, relative to the
+    /// health checks did not change, and the traffic windows of the routes and upstreams that
+    /// keep their names. The TLS files of upstreams are read again, relative to the
     /// configuration file of `certificates`; `prober` makes the probes of the health checks.
     async fn compile(
         &self,
@@ -77,7 +93,11 @@ impl GatewaySnapshot {
             };
             match self.upstream(name, settings, &connect, prober).await {
                 Ok(runtime) => {
-                    let compiled = CompiledUpstream::new(runtime, settings, connect);
+                    let stats = self
+                        .upstreams
+                        .get(name)
+                        .map_or_else(Arc::default, |running| running.stats.clone());
+                    let compiled = CompiledUpstream::new(runtime, settings, connect, stats);
                     upstreams.insert(name.clone(), Arc::new(compiled));
                 }
                 Err(problems) => issues.extend(problems),
@@ -89,7 +109,11 @@ impl GatewaySnapshot {
 
         let mut routes = Vec::new();
         for (name, route) in &config.routes {
-            match CompiledRoute::new(name, route, &upstreams) {
+            let stats = self
+                .routes
+                .get(name)
+                .map_or_else(Arc::default, |running| running.stats.clone());
+            match CompiledRoute::new(name, route, &upstreams, stats) {
                 Ok(compiled) => routes.push((route, Arc::new(compiled))),
                 Err(issue) => issues.push(issue),
             }
@@ -109,7 +133,16 @@ impl GatewaySnapshot {
                 (listener.clone(), router)
             })
             .collect();
-        Ok(Self { routers, upstreams })
+        let routes = routes
+            .into_iter()
+            .map(|(_, compiled)| (compiled.name.clone(), compiled))
+            .collect();
+        Ok(Self {
+            routers,
+            routes,
+            upstreams,
+            all: self.all.clone(),
+        })
     }
 
     /// Returns the runtime of upstream `name`: the running one if its targets, balancing and

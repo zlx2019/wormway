@@ -1,5 +1,6 @@
 //! Integration tests of the Admin API with a real server and database.
 
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
@@ -16,8 +17,9 @@ use tower::ServiceExt;
 use wormway_control::{Admin, AdminToken, Metrics, Store};
 use wormway_core::config::{Config, HealthCheckKind, Listener, Name, Protocol};
 use wormway_runtime::{
-    BoxError, BoxFuture, CertificateReport, Connection, HealthReport, Server, Service,
-    ServiceFactory, Services, Shutdown, TargetReport, TargetState, TlsReport, UpstreamReport,
+    BoxError, BoxFuture, CertificateReport, Connection, HealthReport, PeriodReport, SeriesReport,
+    Server, Service, ServiceFactory, Services, Shutdown, StatsReport, TargetReport, TargetState,
+    TlsReport, TrafficReport, UpstreamReport,
 };
 
 /// Token of the Admin API in these tests.
@@ -112,6 +114,33 @@ impl TlsReport for Tls {
     }
 }
 
+/// Reports two seconds of traffic: a quiet one, then a busy one.
+struct Traffic;
+
+impl StatsReport for Traffic {
+    /// Returns the same seconds every time, for all requests, route `app` and upstream `pool`.
+    fn traffic(&self) -> TrafficReport {
+        let millis = |millis| Some(Duration::from_millis(millis));
+        let busy = PeriodReport {
+            requests: 4,
+            errors: 1,
+            p50: millis(2),
+            p99: millis(250),
+        };
+        let series = SeriesReport {
+            seconds: vec![PeriodReport::default(), busy],
+            total: busy,
+        };
+        let name = |name: &str| -> Name { name.parse().expect("name") };
+        TrafficReport {
+            until: UNIX_EPOCH + Duration::from_secs(1_761_696_000),
+            all: series.clone(),
+            routes: BTreeMap::from([(name("app"), series.clone())]),
+            upstreams: BTreeMap::from([(name("pool"), series)]),
+        }
+    }
+}
+
 /// A server and its Admin API on a fresh database.
 struct Harness {
     /// Routes of the Admin API.
@@ -140,6 +169,7 @@ impl Harness {
         services.register(Protocol::Http, Hello);
         services.set_health_report(Report);
         services.set_tls_report(Tls);
+        services.set_stats_report(Traffic);
         let text = format!("version = 1\n[config]\nsource = \"{source}\"\n");
         let mut config = Config::from_toml(&text).expect("configuration");
         if let Some((_, dynamic)) = store.latest_version().await.expect("latest version") {
@@ -255,6 +285,7 @@ async fn requires_the_token() {
         ("/api/v1/status", Some("Bearer wrong")),
         ("/api/v1/status", Some("Basic dGVzdA==")),
         ("/metrics", None),
+        ("/api/v1/stats", None),
     ] {
         let mut builder = Request::get(uri);
         if let Some(credential) = credential {
@@ -302,6 +333,35 @@ async fn exports_the_state_as_metrics() {
     ];
     assert_eq!(lines, expected, "{body}");
     assert_eq!(body.matches("# HELP ").count(), 2, "{body}");
+}
+
+/// The traffic of the last minute comes as one array per value, the oldest second first, for
+/// all requests, by route and by upstream, with durations in seconds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reports_the_traffic_of_the_last_minute() {
+    let harness = Harness::start("db").await;
+    let (status, body) = harness.get("/api/v1/stats").await;
+    assert_eq!(status, StatusCode::OK);
+    let series = |name: Option<&str>| {
+        let mut series = json!({
+            "requests": [0, 4],
+            "errors": [0, 1],
+            "p50": [null, 0.002],
+            "p99": [null, 0.25],
+            "summary": { "requests": 4, "errors": 1, "p50": 0.002, "p99": 0.25 },
+        });
+        if let Some(name) = name {
+            series["name"] = json!(name);
+        }
+        series
+    };
+    let expected = json!({
+        "until": "2025-10-29T00:00:00.000Z",
+        "all": series(None),
+        "routes": [series(Some("app"))],
+        "upstreams": [series(Some("pool"))],
+    });
+    assert_eq!(body, expected);
 }
 
 /// The status reports the version, the configuration and the listeners.
