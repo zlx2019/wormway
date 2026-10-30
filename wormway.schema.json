@@ -2,6 +2,44 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "additionalProperties": false,
   "definitions": {
+    "AccessLogFormat": {
+      "description": "Format of the access log.",
+      "oneOf": [
+        {
+          "const": "json",
+          "description": "One JSON object per line.",
+          "type": "string"
+        },
+        {
+          "const": "combined",
+          "description": "The combined log format of Nginx and Apache, which log analyzers read.",
+          "type": "string"
+        }
+      ]
+    },
+    "AccessLogSettings": {
+      "additionalProperties": false,
+      "description": "The access log. A thread of its own writes the lines, so requests never wait for it; lines\nthat it cannot keep up with are dropped and counted.",
+      "properties": {
+        "format": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AccessLogFormat"
+            }
+          ],
+          "default": "json",
+          "description": "Format of the lines. Default: `\"json\"`."
+        },
+        "path": {
+          "description": "File that the lines are added to, relative to the configuration file; standard output\nwhen not set. SIGUSR1 opens it again, after a tool such as logrotate moved it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "AdminSettings": {
       "additionalProperties": false,
       "description": "The Admin API and the dashboard.",
@@ -382,6 +420,17 @@
       "additionalProperties": false,
       "description": "Logging.",
       "properties": {
+        "access": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AccessLogSettings"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The access log, one line per request. Off when not set; `[log.access]` turns it on with\nthe defaults."
+        },
         "format": {
           "allOf": [
             {
@@ -537,6 +586,13 @@
       "additionalProperties": false,
       "description": "A rule of the HTTP listeners: the requests it matches go to its upstream, or get a redirect\nor a fixed response. Exactly one of `upstream`, `redirect` and `respond` is set.\n\nWhen several routes match a request, they are compared in this order, and the first\ndifference decides:\n\n1. the higher `priority`;\n2. an exact host, then a wildcard host, then any host;\n3. an exact path, then a regular expression, then a path prefix, longer prefixes first, then\n   any path;\n4. a route with methods before one without;\n5. the route with more header conditions;\n6. the route name in alphabetical order.",
       "properties": {
+        "access_log": {
+          "description": "Write the requests of the route to the access log, when `log.access` turns it on.\nDefault: `true`.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "compress": {
           "description": "Compress responses with gzip, Brotli or zstd, the first that the client accepts, when\ntheir type is text-like. Streams of server-sent events and gRPC are left alone. Default:\n`false`.",
           "type": [

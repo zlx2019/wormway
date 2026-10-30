@@ -7,7 +7,7 @@ use axum::extract::Request;
 use tokio::net::TcpListener;
 use tokio::runtime::Handle;
 use wormway_core::config::Config;
-use wormway_gateway::Gateway;
+use wormway_gateway::{AccessLog, Gateway};
 use wormway_runtime::{Server, Services};
 use wormway_tls::Certificates;
 
@@ -42,10 +42,24 @@ pub fn parse(text: &str) -> Config {
 /// Starts a server with the certificates and the gateway on the test runtime. Relative
 /// certificate paths are resolved against `certificates_dir`.
 pub async fn start(text: &str, certificates_dir: &Path) -> Server {
+    start_logged(text, certificates_dir, None).await
+}
+
+/// Like [`start`], with the gateway writing to `access_log` if set.
+pub async fn start_logged(
+    text: &str,
+    certificates_dir: &Path,
+    access_log: Option<AccessLog>,
+) -> Server {
     let mut services = Services::new();
     let certificates = Certificates::new(certificates_dir);
     certificates.register(&mut services);
-    Gateway::new(2, certificates).register(&mut services);
+    let gateway = Gateway::new(2, certificates);
+    match access_log {
+        Some(access_log) => gateway.with_access_log(access_log),
+        None => gateway,
+    }
+    .register(&mut services);
     match Server::start(Handle::current(), services, parse(text)).await {
         Ok(server) => server,
         Err(error) => panic!("cannot start: {error:?}"),

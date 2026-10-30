@@ -13,6 +13,8 @@ use crate::upstream::CompiledUpstream;
 
 /// A route ready to serve requests.
 pub(crate) struct CompiledRoute {
+    /// Name of the route, for the logs and the metrics.
+    pub(crate) name: Name,
     /// What the route does with a request.
     pub(crate) handler: Handler,
     /// Changes to the path of the requests sent to the upstream.
@@ -25,6 +27,8 @@ pub(crate) struct CompiledRoute {
     pub(crate) compress: bool,
     /// Time limits of the requests to the upstream, in place of those of the upstream.
     pub(crate) timeouts: RouteTimeouts,
+    /// Whether the requests go to the access log.
+    pub(crate) access_log: bool,
 }
 
 /// What a route does with a request.
@@ -69,12 +73,14 @@ impl CompiledRoute {
         let response_headers = HeaderEdits::new(&route.response_headers)
             .map_err(|problem| Issue::new(at(".response_headers"), problem))?;
         Ok(Self {
+            name: name.clone(),
             handler,
             rewrite: route.rewrite.clone(),
             request_headers,
             response_headers,
             compress: route.compress(),
             timeouts: route.timeouts,
+            access_log: route.access_log(),
         })
     }
 

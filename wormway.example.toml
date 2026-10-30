@@ -14,6 +14,11 @@ shutdown_timeout = "30s"    # how long open connections may take to finish on sh
 level = "info"              # tracing directives, such as "info,wormway_runtime=debug"
 format = "text"             # text | json
 
+# The access log, off unless this table is set: one line per request.
+[log.access]
+format = "json"             # json | combined (the format of Nginx and Apache)
+path = "logs/access.log"    # relative to this file; standard output if not set; SIGUSR1 reopens it
+
 [admin]
 listen = "127.0.0.1:9872"   # Admin API and dashboard
 token_file = "admin.token"  # relative to storage.data_dir, created on first start if missing
@@ -71,6 +76,7 @@ redirect = { to = "https://{host}:8443{uri}", status = 301 }
 [routes.maintenance]
 match = { paths = ["/maintenance"] }
 respond = { status = 503, body = "down for maintenance" }
+access_log = false                       # default true; leaves the route out of the access log
 
 # Targets are IP addresses or host names, with a port. Host names are resolved on every change
 # and every 30 seconds after; each of their addresses becomes a target with the weight of the

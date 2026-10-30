@@ -11,6 +11,7 @@ publish.workspace = true
 arc-swap.workspace = true
 async-trait.workspace = true
 http.workspace = true
+metrics.workspace = true
 pingora.workspace = true
 rustls.workspace = true
 tokio = { workspace = true, features = ["io-util", "net", "rt", "time"] }

@@ -58,6 +58,7 @@ toml = "1.1.8"
 tower = "0.5.3"
 tracing = { version = "0.1.44", default-features = false, features = ["std"] }
 tracing-subscriber = "0.3.23"
+tracing-log = "0.2.0"
 # The version Pingora uses, so that one copy is built.
 x509-parser = "0.16.0"
 

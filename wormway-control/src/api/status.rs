@@ -2,7 +2,6 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::Json;
 use axum::extract::State;
@@ -10,6 +9,7 @@ use axum::http::header;
 use axum::response::IntoResponse;
 use serde::Serialize;
 use wormway_core::config::{ConfigSource, HealthCheckKind, Name, Protocol};
+use wormway_core::time::rfc3339;
 use wormway_runtime::{TargetReport, TargetState, UpstreamReport};
 
 use super::Admin;
@@ -176,56 +176,4 @@ pub(crate) async fn metrics(State(admin): State<Arc<Admin>>) -> impl IntoRespons
         )],
         admin.metrics.render(),
     )
-}
-
-/// Writes `time` as an RFC 3339 timestamp in UTC to the millisecond, as the database writes
-/// them, such as `2026-10-29T08:30:00.000Z`. Times before 1970 are written as 1970.
-fn rfc3339(time: SystemTime) -> String {
-    let since_epoch = time.duration_since(UNIX_EPOCH).unwrap_or_default();
-    let (secs, millis) = (since_epoch.as_secs(), since_epoch.subsec_millis());
-    let (days, rest) = (secs / 86_400, secs % 86_400);
-    // The date `days` days after 1970-01-01, after Howard Hinnant's `civil_from_days`: years of
-    // 400 years (eras), with years that start on March 1 so that leap days come last.
-    let shifted = days + 719_468;
-    let era = shifted / 146_097;
-    let day_of_era = shifted % 146_097;
-    let year_of_era =
-        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_from_march = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * month_from_march + 2) / 5 + 1;
-    let month = if month_from_march < 10 {
-        month_from_march + 3
-    } else {
-        month_from_march - 9
-    };
-    let year = year_of_era + era * 400 + u64::from(month <= 2);
-    format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{millis:03}Z",
-        rest / 3_600,
-        rest % 3_600 / 60,
-        rest % 60
-    )
-}
-
-#[cfg(test)]
-mod tests {
-    use std::time::Duration;
-
-    use super::*;
-
-    /// Timestamps match those of Python's datetime, leap days and milliseconds included.
-    #[test]
-    fn writes_rfc3339_timestamps() {
-        let at = |millis: u64| UNIX_EPOCH + Duration::from_millis(millis);
-        assert_eq!(rfc3339(UNIX_EPOCH), "1970-01-01T00:00:00.000Z");
-        assert_eq!(rfc3339(at(951_782_400_000)), "2000-02-29T00:00:00.000Z");
-        assert_eq!(rfc3339(at(1_700_000_000_123)), "2023-11-14T22:13:20.123Z");
-        assert_eq!(rfc3339(at(1_761_696_000_000)), "2025-10-29T00:00:00.000Z");
-        assert_eq!(rfc3339(at(4_102_444_799_999)), "2099-12-31T23:59:59.999Z");
-        assert_eq!(
-            rfc3339(UNIX_EPOCH - Duration::from_secs(1)),
-            "1970-01-01T00:00:00.000Z"
-        );
-    }
 }

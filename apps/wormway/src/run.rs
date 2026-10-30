@@ -1,5 +1,5 @@
-//! `wormway run`: serves until a shutdown signal, and reloads the configuration and certificate
-//! files on SIGHUP.
+//! `wormway run`: serves until a shutdown signal, reloads the configuration and certificate
+//! files on SIGHUP, and opens the access log file again on SIGUSR1.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -14,7 +14,7 @@ use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 use wormway_control::{Admin, AdminToken, Metrics, Store};
 use wormway_core::config::{AdminSettings, Config, ConfigError, ConfigSource, DynamicConfig};
-use wormway_gateway::Gateway;
+use wormway_gateway::{AccessLog, Gateway};
 use wormway_runtime::{ApplyError, Server, Services, Snapshot};
 use wormway_tls::Certificates;
 
@@ -38,6 +38,8 @@ struct Setup {
     token: AdminToken,
     /// Prometheus output of the metrics.
     metrics: Metrics,
+    /// The access log, if it is on.
+    access_log: Option<AccessLog>,
 }
 
 /// Runs Wormway with the configuration file at `path`.
@@ -58,6 +60,12 @@ pub fn run(path: &Path) -> anyhow::Result<ExitCode> {
         path: path.to_owned(),
         token: admin_token(&data_dir, &config.admin)?,
         metrics: Metrics::install()?,
+        access_log: config
+            .log
+            .access
+            .as_ref()
+            .map(|settings| AccessLog::open(settings, load::config_dir(path)))
+            .transpose()?,
         config,
         data_dir,
     };
@@ -102,13 +110,18 @@ fn data_plane(threads: usize) -> std::io::Result<Runtime> {
 }
 
 /// Service factories and engines of the protocols built into this binary: the certificates and
-/// the HTTP gateway. `threads` is the number of data-plane workers; relative certificate paths
-/// are resolved against `config_dir`.
-fn services(threads: usize, config_dir: &Path) -> Services {
+/// the HTTP gateway, which writes to `access_log` if set. `threads` is the number of data-plane
+/// workers; relative certificate paths are resolved against `config_dir`.
+fn services(threads: usize, config_dir: &Path, access_log: Option<AccessLog>) -> Services {
     let mut services = Services::new();
     let certificates = Certificates::new(config_dir);
     certificates.register(&mut services);
-    Gateway::new(threads, certificates).register(&mut services);
+    let gateway = Gateway::new(threads, certificates);
+    match access_log {
+        Some(access_log) => gateway.with_access_log(access_log),
+        None => gateway,
+    }
+    .register(&mut services);
     services
 }
 
@@ -122,6 +135,7 @@ async fn serve(setup: Setup, data_plane: Handle) -> anyhow::Result<ExitCode> {
         data_dir,
         token,
         metrics,
+        access_log,
     } = setup;
     for warning in config.warnings() {
         warn!("{warning}");
@@ -131,7 +145,8 @@ async fn serve(setup: Setup, data_plane: Handle) -> anyhow::Result<ExitCode> {
     if config.config.source == ConfigSource::Db {
         config.set_dynamic(saved_dynamic(&store).await?);
     }
-    let services = services(data_plane.metrics().num_workers(), load::config_dir(&path));
+    let workers = data_plane.metrics().num_workers();
+    let services = services(workers, load::config_dir(&path), access_log.clone());
     let server = Arc::new(Server::start(data_plane, services, config).await?);
     let admin = Admin::new(server.clone(), store.clone(), token, metrics).await?;
     let listener = TcpListener::bind(admin_addr)
@@ -156,8 +171,17 @@ async fn serve(setup: Setup, data_plane: Handle) -> anyhow::Result<ExitCode> {
         "Wormway is ready"
     );
 
-    while signals.next().await == Signal::Reload {
-        reload(&server, &path).await;
+    loop {
+        match signals.next().await {
+            Signal::Reload => reload(&server, &path).await,
+            Signal::ReopenLogs => {
+                if let Some(access_log) = &access_log {
+                    info!("opening the access log again");
+                    access_log.reopen();
+                }
+            }
+            Signal::Shutdown => break,
+        }
     }
     info!("shutting down, waiting for open connections to finish");
     let stopped = async {

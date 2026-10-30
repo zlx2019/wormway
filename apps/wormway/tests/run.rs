@@ -182,6 +182,14 @@ impl Wormway {
         }
     }
 
+    /// Returns every log line so far that no wait returned, without waiting for more.
+    fn drain(&mut self) -> Vec<String> {
+        while let Ok(line) = self.lines.try_recv() {
+            self.seen.push(line);
+        }
+        self.seen.clone()
+    }
+
     /// Waits until listener `name` listens and returns its first address.
     fn listener_addr(&mut self, name: &str) -> String {
         let line = self.wait_for(&format!("listening listener={name}"));
@@ -412,6 +420,96 @@ fn reports_the_health_of_upstreams() {
         state(closed).as_deref(),
         Some(r#""unhealthy" "connection refused""#),
         "{body}"
+    );
+    wormway.signal("TERM");
+    assert_eq!(wormway.exit_code(), Some(0));
+}
+
+/// Returns the lines of the file at `path`, none if it does not exist.
+fn file_lines(path: &Path) -> Vec<String> {
+    std::fs::read_to_string(path)
+        .map(|text| text.lines().map(str::to_owned).collect())
+        .unwrap_or_default()
+}
+
+/// The access log gets a line per request, here in the combined format, and SIGUSR1 opens its
+/// file again after it was moved away, as logrotate does.
+#[test]
+fn writes_the_access_log_and_reopens_it() {
+    let target = upstream("hello");
+    let config = format!(
+        "{EMPTY}[log.access]\nformat = \"combined\"\npath = \"logs/access.log\"\n[listeners.web]\nlisten = [\"127.0.0.1:0\"]\nprotocol = \"http\"\n[routes.all]\nupstream = \"app\"\n[upstreams.app]\ntargets = [\"{target}\"]\n"
+    );
+    let path = temp_config("run-access-log", &config);
+    let log = path.with_file_name("logs").join("access.log");
+    let mut wormway = Wormway::start(&path);
+    let addr = wormway.listener_addr("web");
+    wormway.wait_for("Wormway is ready");
+
+    assert_eq!(get(&addr, "/first", None), (200, "hello".to_owned()));
+    let deadline = Instant::now() + PATIENCE;
+    while file_lines(&log).is_empty() {
+        assert!(Instant::now() < deadline, "no line in the access log");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let line = &file_lines(&log)[0];
+    assert!(line.starts_with("127.0.0.1 - - ["), "{line}");
+    assert!(
+        line.ends_with(r#" +0000] "GET /first HTTP/1.1" 200 5 "-" "-""#),
+        "{line}"
+    );
+
+    let moved = log.with_file_name("access.log.1");
+    std::fs::rename(&log, &moved).expect("move the access log");
+    wormway.signal("USR1");
+    wormway.wait_for("opening the access log again");
+    // The writer opens the file again within a second; until then lines go to the moved one.
+    let deadline = Instant::now() + PATIENCE;
+    while file_lines(&log).is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "the access log was not opened again"
+        );
+        assert_eq!(get(&addr, "/again", None).0, 200);
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(!file_lines(&moved).is_empty());
+    wormway.signal("TERM");
+    assert_eq!(wormway.exit_code(), Some(0));
+}
+
+/// A client that leaves in the middle of its request header makes no error in the log, and
+/// Pingora's own messages about failed requests stay out of it too: a target that refuses
+/// connections makes one warning that names the route and the upstream.
+#[test]
+fn keeps_client_mistakes_out_of_the_log() {
+    let closed = TcpListener::bind("127.0.0.1:0")
+        .and_then(|listener| listener.local_addr())
+        .expect("a free port");
+    let config = format!(
+        "{EMPTY}[listeners.web]\nlisten = [\"127.0.0.1:0\"]\nprotocol = \"http\"\n[routes.broken]\nupstream = \"broken\"\n[upstreams.broken]\ntargets = [\"{closed}\"]\nretries = 0\n"
+    );
+    let mut wormway = Wormway::start(&temp_config("run-client-mistakes", &config));
+    let addr = wormway.listener_addr("web");
+    wormway.wait_for("Wormway is ready");
+
+    let mut half = TcpStream::connect(&addr).expect("connect");
+    half.write_all(b"GET / HTTP/1.1\r\nHost: wormway\r\n")
+        .expect("send half a request header");
+    drop(half);
+    assert_eq!(get(&addr, "/", None).0, 502);
+    let warning = wormway.wait_for("request failed: connection refused");
+    for part in ["WARN", "route=broken", "upstream=broken", "status=502"] {
+        assert!(warning.contains(part), "{part} not in {warning}");
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    let lines = wormway.drain();
+    assert!(
+        lines
+            .iter()
+            .all(|line| !line.contains("ERROR") && !line.contains("Fail to proxy")),
+        "{}",
+        lines.join("\n")
     );
     wormway.signal("TERM");
     assert_eq!(wormway.exit_code(), Some(0));

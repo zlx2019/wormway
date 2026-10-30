@@ -39,16 +39,47 @@ pub struct LogSettings {
     pub level: String,
     /// Output format.
     pub format: LogFormat,
+    /// The access log, one line per request. Off when not set; `[log.access]` turns it on with
+    /// the defaults.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub access: Option<AccessLogSettings>,
 }
 
 impl Default for LogSettings {
-    /// `info` level as plain text.
+    /// `info` level as plain text, without access log.
     fn default() -> Self {
         Self {
             level: "info".to_owned(),
             format: LogFormat::Text,
+            access: None,
         }
     }
+}
+
+/// The access log. A thread of its own writes the lines, so requests never wait for it; lines
+/// that it cannot keep up with are dropped and counted.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(default, deny_unknown_fields)]
+pub struct AccessLogSettings {
+    /// Format of the lines. Default: `"json"`.
+    pub format: AccessLogFormat,
+    /// File that the lines are added to, relative to the configuration file; standard output
+    /// when not set. SIGUSR1 opens it again, after a tool such as logrotate moved it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+}
+
+/// Format of the access log.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum AccessLogFormat {
+    /// One JSON object per line.
+    #[default]
+    Json,
+    /// The combined log format of Nginx and Apache, which log analyzers read.
+    Combined,
 }
 
 /// Log output format.

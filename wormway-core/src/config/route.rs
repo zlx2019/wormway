@@ -67,6 +67,10 @@ pub struct Route {
     /// `false`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compress: Option<bool>,
+    /// Write the requests of the route to the access log, when `log.access` turns it on.
+    /// Default: `true`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access_log: Option<bool>,
     /// Time limits of the requests to the upstream, in place of those of the upstream, such as
     /// `{ read = "5m" }` for slow reports.
     #[serde(default, skip_serializing_if = "RouteTimeouts::is_default")]
@@ -88,6 +92,11 @@ impl Route {
     /// Whether responses are compressed.
     pub fn compress(&self) -> bool {
         self.compress.unwrap_or(false)
+    }
+
+    /// Whether the requests go to the access log.
+    pub fn access_log(&self) -> bool {
+        self.access_log.unwrap_or(true)
     }
 }
 

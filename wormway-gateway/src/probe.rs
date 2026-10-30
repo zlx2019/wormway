@@ -166,6 +166,13 @@ pub(crate) fn describe(error: &pingora::Error) -> String {
         ErrorType::ReadTimedout => return "no answer in time".to_owned(),
         ErrorType::WriteTimedout => return "sending timed out".to_owned(),
         ErrorType::ConnectionClosed => return "connection closed".to_owned(),
+        // Answers that Wormway chose, such as 503 without a usable target, say why in context.
+        ErrorType::HTTPStatus(status) => {
+            return error
+                .context
+                .as_ref()
+                .map_or_else(|| format!("status {status}"), ToString::to_string);
+        }
         ErrorType::TLSHandshakeFailure | ErrorType::HandshakeError => "TLS handshake failed",
         ErrorType::InvalidCert => "invalid certificate",
         ErrorType::ConnectError => "cannot connect",

@@ -20,6 +20,7 @@ use wormway_core::config::{Listener, Name};
 use wormway_runtime::{BoxError, BoxFuture, Connection, Service, ServiceFactory, Shutdown};
 use wormway_tls::Certificates;
 
+use crate::access_log::AccessLog;
 use crate::proxy::Proxy;
 use crate::snapshot::GatewaySnapshot;
 
@@ -42,6 +43,8 @@ pub(crate) struct HttpListeners {
     conf: Arc<ServerConf>,
     /// Certificates of the listeners with TLS.
     certificates: Certificates,
+    /// Where every listener writes the line of each request, if the access log is on.
+    access_log: Option<AccessLog>,
 }
 
 impl HttpListeners {
@@ -50,11 +53,13 @@ impl HttpListeners {
         snapshot: Arc<ArcSwap<GatewaySnapshot>>,
         conf: Arc<ServerConf>,
         certificates: Certificates,
+        access_log: Option<AccessLog>,
     ) -> Self {
         Self {
             snapshot,
             conf,
             certificates,
+            access_log,
         }
     }
 }
@@ -76,6 +81,7 @@ impl ServiceFactory for HttpListeners {
             self.snapshot.clone(),
             keepalive.http1,
             listener.tls.is_some(),
+            self.access_log.clone(),
         );
         // Pingora loads the system root certificates for its upstream connector here, and
         // panics when that fails, for example when SSL_CERT_FILE names a missing file.

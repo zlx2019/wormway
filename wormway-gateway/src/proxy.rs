@@ -1,22 +1,26 @@
 //! The Pingora application of an HTTP listener: finds the route of each request, then forwards
 //! the request to the upstream of the route or answers it, with the changes the route asks for.
 
+use std::fmt;
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime};
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use http::{HeaderValue, Version};
 use pingora::http::{HMap, Method, RequestHeader, ResponseHeader};
 use pingora::lb::Backend;
-use pingora::proxy::{FailToProxy, ProxyHttp, Session};
+use pingora::proxy::{FailToProxy, ProxyHttp, ProxyWarnLogContext, Session};
 use pingora::upstreams::peer::HttpPeer;
 use pingora::{Error, ErrorSource, ErrorType, HTTPStatus, RetryType};
 use wormway_core::config::{HashKey, Name, Rewrite};
 use wormway_core::routing::{self, Request, RequestHeaders};
 
+use crate::access_log::{AccessLog, Record};
 use crate::compress;
 use crate::headers::{self, HeaderEdits, RequestId};
+use crate::probe::describe;
 use crate::route::{CompiledRoute, FixedResponse, Handler, RedirectTarget};
 use crate::snapshot::GatewaySnapshot;
 use crate::upstream::{CompiledUpstream, Inflight};
@@ -32,10 +36,18 @@ pub(crate) struct Proxy {
     keepalive: Option<u64>,
     /// Whether the listener has TLS, for `X-Forwarded-Proto`.
     tls: bool,
+    /// Where the line of each request goes, if the access log is on.
+    access_log: Option<AccessLog>,
 }
 
 /// State of one request.
 pub(crate) struct RequestContext {
+    /// When the request header had arrived.
+    started: Instant,
+    /// When the first target was picked.
+    upstream_started: Option<Instant>,
+    /// From picking the first target to the response header of the last one.
+    upstream_duration: Option<Duration>,
     /// Routes and upstreams when the request started, kept until it ends.
     snapshot: Arc<GatewaySnapshot>,
     /// Route of the request, once found.
@@ -55,18 +67,21 @@ pub(crate) struct RequestContext {
 }
 
 impl Proxy {
-    /// Creates the application of `listener`, which has TLS if `tls`.
+    /// Creates the application of `listener`, which has TLS if `tls`, writing a line for every
+    /// request to `access_log` if set.
     pub(crate) fn new(
         listener: Name,
         snapshot: Arc<ArcSwap<GatewaySnapshot>>,
         keepalive: Option<u64>,
         tls: bool,
+        access_log: Option<AccessLog>,
     ) -> Self {
         Self {
             listener,
             snapshot,
             keepalive,
             tls,
+            access_log,
         }
     }
 
@@ -94,6 +109,9 @@ impl ProxyHttp for Proxy {
     /// Takes the snapshot in effect, which the request keeps until it ends, and draws its ID.
     fn new_ctx(&self) -> RequestContext {
         RequestContext {
+            started: Instant::now(),
+            upstream_started: None,
+            upstream_duration: None,
             snapshot: self.snapshot.load_full(),
             route: None,
             request_id: RequestId::new(),
@@ -167,6 +185,7 @@ impl ProxyHttp for Proxy {
         };
         ctx.inflight = upstream.runtime.track(&target);
         ctx.answered = false;
+        ctx.upstream_started.get_or_insert_with(Instant::now);
         let peer = upstream.peer(&target, &route.timeouts);
         ctx.tried.push(target);
         Ok(Box::new(peer))
@@ -188,12 +207,20 @@ impl ProxyHttp for Proxy {
         let Some(upstream) = route.upstream() else {
             return e;
         };
-        if let Some(target) = ctx.tried.last() {
-            upstream.runtime.failed(target, &e);
-        }
+        let Some(target) = ctx.tried.last() else {
+            return e;
+        };
+        upstream.runtime.failed(target, &e);
         if ctx.retries >= upstream.retries() {
             return e;
         }
+        tracing::debug!(
+            listener = %self.listener,
+            route = %route.name,
+            target = %target.addr,
+            "cannot connect: {}; trying another target",
+            describe(&e)
+        );
         let tried = &ctx.tried;
         let next = upstream
             .runtime
@@ -273,8 +300,49 @@ impl ProxyHttp for Proxy {
     ) -> pingora::Result<()> {
         if !upstream_response.status.is_informational() {
             ctx.answered = true;
+            ctx.upstream_duration = ctx.upstream_started.map(|started| started.elapsed());
         }
         Ok(())
+    }
+
+    /// Logs the request if it failed, and writes its line to the access log unless its route
+    /// leaves it out.
+    async fn logging(
+        &self,
+        session: &mut Session,
+        error: Option<&Error>,
+        ctx: &mut RequestContext,
+    ) {
+        let status = response_status(session);
+        if let Some(error) = error {
+            self.log_failure(error, ctx, status);
+        }
+        if let Some(access_log) = &self.access_log
+            && ctx.route.as_ref().is_none_or(|route| route.access_log)
+        {
+            access_log.write(self.record(session, error, ctx, status));
+        }
+    }
+
+    /// Wormway logs failed requests itself, see [`Proxy::log_failure`].
+    fn suppress_error_log(
+        &self,
+        _session: &Session,
+        _ctx: &RequestContext,
+        _error: &Error,
+    ) -> bool {
+        true
+    }
+
+    /// Attempts that are retried go to the debug log instead, see [`Proxy::fail_to_connect`].
+    fn suppress_proxy_warn_log(
+        &self,
+        _session: &Session,
+        _ctx: &RequestContext,
+        _error: &Error,
+        _context: ProxyWarnLogContext,
+    ) -> bool {
+        true
     }
 
     /// Tells the upstream about the client, then rewrites the path and changes the headers as
@@ -322,6 +390,121 @@ impl ProxyHttp for Proxy {
             compress::skip_unsuitable(session, response);
         }
         route.response_headers.apply(response)
+    }
+}
+
+impl Proxy {
+    /// Logs a request that failed with `error`, at a level that follows where the failure came
+    /// from: a warning for the upstream and for answers Wormway chose, such as 503 without a
+    /// usable target; debug for clients that went away; an error for the rest.
+    fn log_failure(&self, error: &Error, ctx: &RequestContext, status: u16) {
+        let route = OrDash(ctx.route.as_ref().map(|route| route.name.as_str()));
+        let upstream = ctx.route.as_ref().and_then(|route| route.upstream());
+        let upstream = OrDash(upstream.map(|upstream| upstream.name().as_str()));
+        let target = ctx.tried.last().map(|target| target.addr.to_string());
+        let target = OrDash(target.as_deref());
+        let request_id = ctx.request_id.as_str();
+        let reason = describe(error);
+        match (error.etype(), error.esource()) {
+            (_, ErrorSource::Downstream) => tracing::debug!(
+                listener = %self.listener, route = %route, status, request_id = %request_id,
+                "client went away: {reason}"
+            ),
+            (HTTPStatus(_), _) | (_, ErrorSource::Upstream) => tracing::warn!(
+                listener = %self.listener, route = %route, upstream = %upstream,
+                target = %target, status, request_id = %request_id, "request failed: {reason}"
+            ),
+            _ => tracing::error!(
+                listener = %self.listener, route = %route, upstream = %upstream,
+                target = %target, status, request_id = %request_id, "request failed: {reason}"
+            ),
+        }
+    }
+
+    /// Returns the access log line of a request that ended with `status`, and with `error` if
+    /// it failed.
+    fn record(
+        &self,
+        session: &Session,
+        error: Option<&Error>,
+        ctx: &RequestContext,
+        status: u16,
+    ) -> Record {
+        let request = session.req_header();
+        let header = |name: &str| {
+            let value = request.headers.get(name)?;
+            Some(String::from_utf8_lossy(value.as_bytes()).into_owned())
+        };
+        let host = match request.uri.authority() {
+            Some(authority) => Some(authority.as_str().to_owned()),
+            None => header("host"),
+        };
+        let tls = session
+            .digest()
+            .and_then(|digest| digest.ssl_digest.as_ref())
+            .map(|ssl| ssl.version.replace('_', "."));
+        Record {
+            time: SystemTime::now(),
+            client: session
+                .client_addr()
+                .and_then(|addr| addr.as_inet())
+                .copied(),
+            method: request.method.as_str().to_owned(),
+            host,
+            uri: String::from_utf8_lossy(request_target(request)).into_owned(),
+            protocol: protocol(request.version),
+            status,
+            request_bytes: session.body_bytes_read(),
+            response_bytes: session.body_bytes_sent(),
+            duration: ctx.started.elapsed(),
+            listener: self.listener.clone(),
+            route: ctx.route.as_ref().map(|route| route.name.clone()),
+            upstream: ctx
+                .route
+                .as_ref()
+                .and_then(|route| route.upstream())
+                .map(|upstream| upstream.name().clone()),
+            target: ctx
+                .tried
+                .last()
+                .and_then(|target| target.addr.as_inet())
+                .copied(),
+            upstream_duration: ctx.upstream_duration,
+            request_id: ctx.request_id.as_str().to_owned(),
+            user_agent: header("user-agent"),
+            referer: header("referer"),
+            tls,
+            error: error.map(describe),
+        }
+    }
+}
+
+/// Shows a value of the log that may be missing, as `-` then.
+struct OrDash<'a>(Option<&'a str>);
+
+impl fmt::Display for OrDash<'_> {
+    /// Writes the value, or `-`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.0.unwrap_or("-"))
+    }
+}
+
+/// Returns the status of the response to a request, or 499 when the client left before one,
+/// as Nginx logs it.
+fn response_status(session: &Session) -> u16 {
+    session
+        .response_written()
+        .map_or(499, |response| response.status.as_u16())
+}
+
+/// Returns the name of HTTP `version` as request lines write it.
+fn protocol(version: Version) -> &'static str {
+    match version {
+        Version::HTTP_09 => "HTTP/0.9",
+        Version::HTTP_10 => "HTTP/1.0",
+        Version::HTTP_2 => "HTTP/2.0",
+        Version::HTTP_3 => "HTTP/3.0",
+        _ => "HTTP/1.1",
     }
 }
 

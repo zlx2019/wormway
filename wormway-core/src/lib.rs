@@ -1,5 +1,5 @@
-//! Core types for Wormway: the configuration model, route and rule matching, error types and
-//! more. It does not depend on any networking framework.
+//! Core types for Wormway: the configuration model, route and rule matching, timestamps, error
+//! types and more. It does not depend on any networking framework.
 //!
 //! Features:
 //!
@@ -7,3 +7,4 @@
 
 pub mod config;
 pub mod routing;
+pub mod time;

@@ -74,6 +74,11 @@ impl CompiledUpstream {
         }
     }
 
+    /// Returns the name of the upstream.
+    pub(crate) fn name(&self) -> &Name {
+        &self.runtime.name
+    }
+
     /// Returns what consistent hashing hashes, or `None` if the upstream balances otherwise.
     pub(crate) fn hash_key(&self) -> Option<&HashKey> {
         self.hash_key.as_ref()

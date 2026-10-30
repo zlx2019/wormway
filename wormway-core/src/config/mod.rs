@@ -39,8 +39,8 @@ pub use route::{
     RouteMatch,
 };
 pub use settings::{
-    AdminSettings, ConfigSettings, ConfigSource, LogFormat, LogSettings, ServerSettings,
-    StorageSettings,
+    AccessLogFormat, AccessLogSettings, AdminSettings, ConfigSettings, ConfigSource, LogFormat,
+    LogSettings, ServerSettings, StorageSettings,
 };
 pub use upstream::{
     Balance, HashKey, HealthCheck, HealthCheckKind, InvalidTargetAddress, PassiveCheck,
@@ -280,6 +280,8 @@ pub fn json_schema() -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
 
     /// Parses `text` and returns the parse error it must produce.
@@ -348,6 +350,35 @@ mod tests {
             "example"
         );
         assert!(config.warnings().is_empty());
+    }
+
+    /// The access log is off until `[log.access]` turns it on, as JSON to standard output unless
+    /// set otherwise; routes go to it unless they opt out.
+    #[test]
+    fn reads_access_log_settings() {
+        let plain = Config::from_toml("version = 1").unwrap();
+        assert_eq!(plain.log.access, None);
+        let config = Config::from_toml(
+            "version = 1\n[log.access]\n[routes.quiet]\naccess_log = false\nrespond = { status = 204 }\n",
+        )
+        .unwrap();
+        let access = config.log.access.clone().unwrap();
+        assert_eq!(access.format, AccessLogFormat::Json);
+        assert_eq!(access.path, None);
+        assert!(!config.routes["quiet"].access_log());
+        assert!(Route::default().access_log());
+        let text = toml::to_string(&config).unwrap();
+        assert_eq!(Config::from_toml(&text).unwrap(), config);
+
+        let config = Config::from_toml(
+            "version = 1\n[log.access]\nformat = \"combined\"\npath = \"logs/access.log\"\n",
+        )
+        .unwrap();
+        let access = config.log.access.unwrap();
+        assert_eq!(access.format, AccessLogFormat::Combined);
+        assert_eq!(access.path, Some(PathBuf::from("logs/access.log")));
+        let error = parse_error("version = 1\n[log.access]\nformat = \"apache\"\n");
+        assert!(error.to_string().contains("apache"), "{error}");
     }
 
     /// Serializing to TOML and parsing again gives the same configuration.

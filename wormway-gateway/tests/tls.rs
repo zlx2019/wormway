@@ -6,7 +6,9 @@ mod common;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use rcgen::{BasicConstraints, CertificateParams, CertifiedIssuer, IsCa, KeyPair};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -18,10 +20,11 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWrite
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
-use wormway_core::config::ConfigError;
+use wormway_core::config::{AccessLogFormat, AccessLogSettings, ConfigError};
+use wormway_gateway::AccessLog;
 use wormway_runtime::ApplyError;
 
-use crate::common::{addr, parse, serve, start, upstream};
+use crate::common::{addr, parse, serve, start, start_logged, upstream};
 
 /// A test certificate authority and the directory of the certificate files.
 struct Pki {
@@ -329,6 +332,43 @@ async fn agrees_on_http2_or_http1_through_alpn() {
         get_http1(stream, "/over-h1").await,
         (200, "app test /over-h1".to_owned())
     );
+}
+
+/// The access log tells the TLS version and the HTTP version of requests over TLS.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn logs_the_tls_and_http_versions() {
+    let pki = Pki::new();
+    pki.issue("a", &["a.test"]);
+    let text = config(r#"{ certificates = ["a"] }"#, &["a"], upstream("app").await);
+    let log = pki.dir.path().join("access.log");
+    let settings = AccessLogSettings {
+        format: AccessLogFormat::Json,
+        path: Some(log.clone()),
+    };
+    let access_log = AccessLog::open(&settings, Path::new(".")).expect("open the access log");
+    let server = start_logged(&text, pki.dir.path(), Some(access_log)).await;
+    let secure = addr(&server, "secure").await;
+
+    let stream = connect(&pki.client(&[b"h2"]), secure, Some("a.test"))
+        .await
+        .expect("handshake");
+    let (status, _) = get_http2(stream, "https", "/logged").await.expect("HTTP/2");
+    assert_eq!(status, 200);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let line = loop {
+        let text = std::fs::read_to_string(&log).unwrap_or_default();
+        if let Some(line) = text.lines().next() {
+            break line.to_owned();
+        }
+        assert!(tokio::time::Instant::now() < deadline, "no line logged");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    for part in [
+        r#""host":"test","uri":"/logged","protocol":"HTTP/2.0","status":200"#,
+        r#""tls":"TLSv1.3""#,
+    ] {
+        assert!(line.contains(part), "{part} not in {line}");
+    }
 }
 
 /// A listener without TLS speaks HTTP/2 to clients that start with it only when h2c is on.
