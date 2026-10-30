@@ -325,9 +325,15 @@ fn reports_unreadable_root_certificates() {
     );
     let path = temp_config("run-root-certificates", &config);
     let missing = path.with_file_name("missing-ca.pem");
+    let missing_dir = path.with_file_name("missing-ca");
+    // Certificates in SSL_CERT_DIR would make up for the missing file, and some systems set it,
+    // such as the Ubuntu runners of GitHub Actions.
     let mut wormway = Wormway::start_with_env(
         &path,
-        &[("SSL_CERT_FILE", missing.to_str().expect("UTF-8"))],
+        &[
+            ("SSL_CERT_FILE", missing.to_str().expect("UTF-8")),
+            ("SSL_CERT_DIR", missing_dir.to_str().expect("UTF-8")),
+        ],
     );
     wormway.wait_for("Error: listener web: cannot create the service");
     let cause = wormway.wait_for("cannot load the system root certificates");
