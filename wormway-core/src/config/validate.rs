@@ -1,13 +1,14 @@
 //! Rules that span fields. Each check appends to a list, so one run reports every problem.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use super::http::is_token;
 use super::upstream::is_host_name;
 use super::{
-    AcmeChallenge, Balance, Config, ConfigSource, Duration, HashKey, HeaderName, HeaderRules,
-    HealthCheckKind, Issue, Name, PathPattern, Redirect, Route, Target, Upstream, UpstreamProtocol,
+    AcmeChallenge, ApiKeyHash, Balance, Config, ConfigSource, Duration, HashKey, HeaderName,
+    HeaderRules, HealthCheckKind, Issue, Name, PathPattern, RateLimitKey, Redirect, Route, Target,
+    Upstream, UpstreamProtocol,
 };
 use crate::routing::normalize_path;
 
@@ -32,6 +33,8 @@ pub(super) fn errors(config: &Config) -> Vec<Issue> {
     check_upstreams(config, &mut issues);
     check_acme(config, &mut issues);
     check_certificates(config, &mut issues);
+    check_consumers(config, &mut issues);
+    check_jwt(config, &mut issues);
     issues
 }
 
@@ -45,6 +48,8 @@ pub(super) fn warnings(config: &Config) -> Vec<Issue> {
         ("routes", config.routes.is_empty()),
         ("upstreams", config.upstreams.is_empty()),
         ("certificates", config.certificates.is_empty()),
+        ("consumers", config.consumers.is_empty()),
+        ("jwt", config.jwt.is_empty()),
     ];
     tables
         .into_iter()
@@ -129,6 +134,59 @@ fn check_certificates(config: &Config, issues: &mut Vec<Issue>) {
     }
 }
 
+/// Each API key belongs to one consumer, listed once.
+fn check_consumers(config: &Config, issues: &mut Vec<Issue>) {
+    let mut owners: HashMap<&ApiKeyHash, &Name> = HashMap::new();
+    for (name, consumer) in &config.consumers {
+        for (i, key) in consumer.api_keys.iter().enumerate() {
+            let at = format!("consumers.{name}.api_keys[{i}]");
+            match owners.get(key) {
+                Some(&owner) if owner == name => issues.push(Issue::new(at, "listed twice")),
+                Some(owner) => issues.push(Issue::new(
+                    at,
+                    format!("also a key of consumer \"{owner}\""),
+                )),
+                None => {
+                    owners.insert(key, name);
+                }
+            }
+        }
+    }
+}
+
+/// The key of each JWT setting fits its algorithm: a shared secret for the HS algorithms, a
+/// public key for the others; and the consumer comes from a named claim.
+fn check_jwt(config: &Config, issues: &mut Vec<Issue>) {
+    for (name, jwt) in &config.jwt {
+        let at = |field: &str| format!("jwt.{name}.{field}");
+        let (hmac, key_pairs) = ("the HS algorithms", "the RS, PS, ES and EdDSA algorithms");
+        if jwt.algorithm.is_hmac() {
+            if jwt.secret.is_none() {
+                issues.push(Issue::new(at("secret"), format!("needed by {hmac}")));
+            }
+            if jwt.public_key.is_some() {
+                issues.push(Issue::new(
+                    at("public_key"),
+                    format!("only for {key_pairs}"),
+                ));
+            }
+        } else {
+            if jwt.public_key.is_none() {
+                issues.push(Issue::new(
+                    at("public_key"),
+                    format!("needed by {key_pairs}"),
+                ));
+            }
+            if jwt.secret.is_some() {
+                issues.push(Issue::new(at("secret"), format!("only for {hmac}")));
+            }
+        }
+        if jwt.consumer_claim().is_empty() {
+            issues.push(Issue::new(at("consumer_claim"), "must not be empty"));
+        }
+    }
+}
+
 /// Each listener has an address, and its TLS settings name existing certificates.
 fn check_listeners(config: &Config, issues: &mut Vec<Issue>) {
     for (name, listener) in &config.listeners {
@@ -208,6 +266,40 @@ fn check_routes(config: &Config, issues: &mut Vec<Issue>) {
         check_action(config, name, route, issues);
         check_modifiers(name, route, issues);
         check_limits(name, route, issues);
+        check_auth(config, name, route, issues);
+    }
+}
+
+/// The authentication of the route takes credentials in at least one way, names existing JWT
+/// settings, and lets through consumers that can authenticate: without JWTs, only those of the
+/// configuration can.
+fn check_auth(config: &Config, name: &Name, route: &Route, issues: &mut Vec<Issue>) {
+    let Some(auth) = &route.auth else {
+        return;
+    };
+    let at = format!("routes.{name}.auth");
+    if !auth.basic() && auth.api_key_header().is_none() && auth.jwt.is_none() {
+        issues.push(Issue::new(
+            &at,
+            "set at least one of basic, api_key and jwt",
+        ));
+    }
+    match &auth.jwt {
+        Some(jwt) if !config.jwt.contains_key(jwt) => issues.push(Issue::new(
+            format!("{at}.jwt"),
+            format!("unknown jwt \"{jwt}\""),
+        )),
+        Some(_) => {}
+        None => {
+            for (i, consumer) in auth.consumers.iter().enumerate() {
+                if !config.consumers.contains_key(consumer.as_str()) {
+                    issues.push(Issue::new(
+                        format!("{at}.consumers[{i}]"),
+                        format!("unknown consumer \"{consumer}\""),
+                    ));
+                }
+            }
+        }
     }
 }
 
@@ -221,6 +313,12 @@ fn check_limits(name: &Name, route: &Route, issues: &mut Vec<Issue>) {
         }
         if limit.per.get().is_zero() {
             issues.push(Issue::new(format!("{at}.per"), "must be longer than 0s"));
+        }
+        if limit.key == Some(RateLimitKey::Consumer) && route.auth.is_none() {
+            issues.push(Issue::new(
+                format!("{at}.key"),
+                "\"consumer\" needs auth on the route",
+            ));
         }
     }
     if route.concurrency_limit == Some(0) {
@@ -1070,10 +1168,14 @@ mod tests {
             upstream = "app"
             [upstreams.app]
             targets = ["127.0.0.1:9000"]
+            [consumers.alice]
+            [jwt.main]
+            algorithm = "HS256"
+            secret = { env = "JWT_SECRET" }
             "#;
         assert_eq!(
             paths(&warnings(&parse(text))),
-            ["listeners", "routes", "upstreams"]
+            ["listeners", "routes", "upstreams", "consumers", "jwt"]
         );
 
         let file_mode = format!("{text}\n[config]\nsource = \"file\"\n");
@@ -1101,6 +1203,13 @@ mod tests {
             rate_limit = { requests = 1, per = "1m", key = "route" }
             concurrency_limit = 1
             max_body_size = "1KiB"
+            [routes.signed-in]
+            upstream = "app"
+            rate_limit = { requests = 1, per = "1m", key = "consumer" }
+            auth = { basic = true }
+            [routes.anonymous]
+            upstream = "app"
+            rate_limit = { requests = 1, per = "1m", key = "consumer" }
             [upstreams.app]
             targets = ["127.0.0.1:9000"]
             "#,
@@ -1109,6 +1218,7 @@ mod tests {
         assert_eq!(
             paths(&issues),
             [
+                "routes.anonymous.rate_limit.key",
                 "routes.closed.rate_limit.requests",
                 "routes.closed.rate_limit.per",
                 "routes.closed.concurrency_limit",
@@ -1116,7 +1226,115 @@ mod tests {
                 "routes.fixed.max_body_size",
             ]
         );
-        assert_eq!(issues[3].message, "must be at least 1B");
-        assert_eq!(issues[4].message, "only for routes with an upstream");
+        assert_eq!(issues[0].message, "\"consumer\" needs auth on the route");
+        assert_eq!(issues[4].message, "must be at least 1B");
+        assert_eq!(issues[5].message, "only for routes with an upstream");
+    }
+
+    /// The SHA-256 of `test`, of `test2` and of `test3`.
+    const KEYS: [&str; 3] = [
+        "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+        "sha256:60303ae22b998861bce3b28f33eec1be758a213c86c93c076dbe9f558c11c752",
+        "sha256:fd61a03af4f77d870fc21e05e7e80678095c92d808cfb3b5c279ee04c74aca13",
+    ];
+
+    /// An API key belongs to one consumer, listed once; JWT settings have the key their
+    /// algorithm needs, and a claim for the consumer.
+    #[test]
+    fn checks_consumers_and_jwt_settings() {
+        let [test, test2, test3] = KEYS;
+        let config = parse(&format!(
+            r#"
+            version = 1
+            [consumers.alice]
+            api_keys = ["{test}", "{test2}", "{test}"]
+            [consumers.bob]
+            api_keys = ["{test3}", "{test2}"]
+            [jwt.hmac]
+            algorithm = "HS256"
+            secret = {{ env = "JWT_SECRET" }}
+            [jwt.rsa]
+            algorithm = "RS256"
+            public_key = "jwt.pub"
+            consumer_claim = "client_id"
+            [jwt.hmac-with-key]
+            algorithm = "HS384"
+            public_key = "jwt.pub"
+            [jwt.rsa-with-secret]
+            algorithm = "PS256"
+            secret = {{ file = "secret" }}
+            consumer_claim = ""
+            "#
+        ));
+        let issues = errors(&config);
+        assert_eq!(
+            paths(&issues),
+            [
+                "consumers.alice.api_keys[2]",
+                "consumers.bob.api_keys[1]",
+                "jwt.hmac-with-key.secret",
+                "jwt.hmac-with-key.public_key",
+                "jwt.rsa-with-secret.public_key",
+                "jwt.rsa-with-secret.secret",
+                "jwt.rsa-with-secret.consumer_claim",
+            ]
+        );
+        let messages: Vec<&str> = issues.iter().map(|issue| issue.message.as_str()).collect();
+        assert_eq!(
+            messages,
+            [
+                "listed twice",
+                "also a key of consumer \"alice\"",
+                "needed by the HS algorithms",
+                "only for the RS, PS, ES and EdDSA algorithms",
+                "needed by the RS, PS, ES and EdDSA algorithms",
+                "only for the HS algorithms",
+                "must not be empty",
+            ]
+        );
+    }
+
+    /// Authentication takes credentials in some way, from JWT settings that exist, and lets
+    /// through consumers that exist unless JWTs can name others.
+    #[test]
+    fn checks_route_auth() {
+        let config = parse(
+            r#"
+            version = 1
+            [routes.basic]
+            respond = { status = 204 }
+            auth = { basic = true, consumers = ["alice"] }
+            [routes.jwt]
+            upstream = "app"
+            auth = { jwt = "main", api_key = { header = "X-Token" }, consumers = ["auth0|42"] }
+            [routes.nothing]
+            upstream = "app"
+            auth = { basic = false, api_key = false, consumers = ["alice", "bob"] }
+            [routes.missing]
+            upstream = "app"
+            auth = { jwt = "other", consumers = ["bob"] }
+            [upstreams.app]
+            targets = ["127.0.0.1:9000"]
+            [consumers.alice]
+            [jwt.main]
+            algorithm = "HS256"
+            secret = { env = "JWT_SECRET" }
+            "#,
+        );
+        let issues = errors(&config);
+        assert_eq!(
+            paths(&issues),
+            [
+                "routes.missing.auth.jwt",
+                "routes.nothing.auth",
+                "routes.nothing.auth.consumers[1]",
+            ]
+        );
+        assert_eq!(issues[0].message, "unknown jwt \"other\"");
+        assert_eq!(
+            issues[1].message,
+            "set at least one of basic, api_key and jwt"
+        );
+        assert_eq!(issues[2].message, "unknown consumer \"bob\"");
     }
 }

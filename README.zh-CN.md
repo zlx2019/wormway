@@ -10,7 +10,7 @@
 
 | 支柱 | 内容 |
 |---|---|
-| 网关 | 反向代理、正向代理与负载均衡（HTTP/1.1、HTTP/2、gRPC、WebSocket），TLS 与 ACME，限流，健康检查。L7 引擎基于 [Pingora](https://github.com/cloudflare/pingora)。 |
+| 网关 | 反向代理、正向代理与负载均衡（HTTP/1.1、HTTP/2、gRPC、WebSocket），TLS 与 ACME，限流，鉴权（Basic、API Key、JWT），健康检查。L7 引擎基于 [Pingora](https://github.com/cloudflare/pingora)。 |
 | 代理协议 | 首批：SOCKS5、HTTP CONNECT、Shadowsocks、Trojan、VLESS、Hysteria2，之后按需增加。 |
 | 反向隧道 | 把位于 NAT 后的服务通过网关对外发布。 |
 | 面板 | Web 界面与 Admin API，管理配置、证书、用户与流量。 |

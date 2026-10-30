@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use super::HostPattern;
+use super::{HostPattern, Secret};
 
 /// A TLS certificate: a chain and its private key read from PEM files, or one that Wormway gets
 /// and renews through ACME. Set `cert` and `key`, or `acme`.
@@ -70,18 +70,4 @@ pub enum DnsProvider {
         /// Edit).
         api_token: Secret,
     },
-}
-
-/// A secret that the configuration refers to instead of holding it, read whenever the
-/// configuration is applied: `{ env = "NAME" }` takes an environment variable, `{ file =
-/// "path" }` the content of a file, relative to the configuration file. Whitespace around the
-/// value is dropped.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(rename_all = "lowercase")]
-pub enum Secret {
-    /// The value of this environment variable.
-    Env(String),
-    /// The content of this file.
-    File(PathBuf),
 }

@@ -103,6 +103,8 @@ pub(crate) struct Record {
     pub(crate) target: Option<SocketAddr>,
     /// From choosing the first target to the response header of the last one.
     pub(crate) upstream_duration: Option<Duration>,
+    /// The consumer that the authentication of the route found.
+    pub(crate) consumer: Option<String>,
     /// The request ID, as sent to the upstream in `X-Request-Id`.
     pub(crate) request_id: String,
     /// The `User-Agent` header.
@@ -145,6 +147,7 @@ impl Record {
             self.target.map(|target| target.to_string()).as_deref(),
         );
         object.seconds("upstream_duration", self.upstream_duration);
+        object.string("consumer", self.consumer.as_deref());
         object.string("request_id", Some(&self.request_id));
         object.string("user_agent", self.user_agent.as_deref());
         object.string("referer", self.referer.as_deref());
@@ -154,12 +157,15 @@ impl Record {
     }
 
     /// Writes the record in the combined log format of Nginx, without the line break:
-    /// `client - - [time] "request" status bytes "referer" "user agent"`. The time keeps the
-    /// layout of Nginx, in the time zone of `time`.
+    /// `client - consumer [time] "request" status bytes "referer" "user agent"`, the consumer in
+    /// the place of the user of Basic authentication. The time keeps the layout of Nginx, in the
+    /// time zone of `time`.
     pub(crate) fn combined(&self, line: &mut String, time: &LogTime) {
         let client = self.client.map(|client| client.ip().to_string());
         line.push_str(client.as_deref().unwrap_or("-"));
-        line.push_str(" - - [");
+        line.push_str(" - ");
+        push_escaped(line, self.consumer.as_deref().unwrap_or("-"));
+        line.push_str(" [");
         let _ = time.write_common_log(line, self.time);
         line.push_str("] \"");
         push_escaped(line, &self.method);
@@ -445,6 +451,7 @@ mod tests {
             upstream: Some("app".parse().unwrap()),
             target: Some("10.0.0.1:80".parse().unwrap()),
             upstream_duration: Some(Duration::from_micros(1_200)),
+            consumer: Some("alice".to_owned()),
             request_id: "0123abcd".to_owned(),
             user_agent: Some("say \"hi\"\t\\ é".to_owned()),
             referer: None,
@@ -460,7 +467,7 @@ mod tests {
         record().json(&mut line, &LogTime::default());
         assert_eq!(
             line,
-            r#"{"time":"2025-10-29T00:00:00.123Z","client_ip":"::1","client_port":52000,"method":"GET","host":"api.local","uri":"/v1/users?q=a b","protocol":"HTTP/1.1","status":200,"request_bytes":0,"response_bytes":1234,"duration":0.001500,"listener":"web","route":"api","upstream":"app","target":"10.0.0.1:80","upstream_duration":0.001200,"request_id":"0123abcd","user_agent":"say \"hi\"\t\\ é","referer":null,"tls":"TLSv1.3","error":null}"#
+            r#"{"time":"2025-10-29T00:00:00.123Z","client_ip":"::1","client_port":52000,"method":"GET","host":"api.local","uri":"/v1/users?q=a b","protocol":"HTTP/1.1","status":200,"request_bytes":0,"response_bytes":1234,"duration":0.001500,"listener":"web","route":"api","upstream":"app","target":"10.0.0.1:80","upstream_duration":0.001200,"consumer":"alice","request_id":"0123abcd","user_agent":"say \"hi\"\t\\ é","referer":null,"tls":"TLSv1.3","error":null}"#
         );
     }
 
@@ -471,7 +478,7 @@ mod tests {
         record().combined(&mut line, &LogTime::default());
         assert_eq!(
             line,
-            r#"::1 - - [29/Oct/2025:00:00:00 +0000] "GET /v1/users?q=a b HTTP/1.1" 200 1234 "-" "say \x22hi\x22\x09\x5C \xC3\xA9""#
+            r#"::1 - alice [29/Oct/2025:00:00:00 +0000] "GET /v1/users?q=a b HTTP/1.1" 200 1234 "-" "say \x22hi\x22\x09\x5C \xC3\xA9""#
         );
     }
 
@@ -492,7 +499,7 @@ mod tests {
         line.clear();
         record().combined(&mut line, &time);
         assert!(
-            line.starts_with("::1 - - [29/Oct/2025:00:00:00 +0000] \"GET "),
+            line.starts_with("::1 - alice [29/Oct/2025:00:00:00 +0000] \"GET "),
             "{line}"
         );
     }

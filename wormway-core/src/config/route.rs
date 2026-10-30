@@ -11,7 +11,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use super::http::is_header_value;
 use super::{
     Action, ByteSize, HeaderName, HeaderRules, Method, Name, RateLimit, Redirect, Respond, Rewrite,
-    RouteTimeouts,
+    RouteAuth, RouteTimeouts,
 };
 
 /// A rule of the HTTP listeners: the requests it matches go to its upstream, or get a redirect
@@ -88,6 +88,10 @@ pub struct Route {
     /// it, any size.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_body_size: Option<ByteSize>,
+    /// Who may use the route: requests must show the credentials of a consumer, such as
+    /// `{ api_key = true, jwt = "main" }`, or get 401.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<RouteAuth>,
 }
 
 impl Route {

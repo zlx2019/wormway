@@ -10,6 +10,7 @@ use wormway_core::routing::{Request, Router};
 use wormway_runtime::{BoxFuture, Engine, HealthReport, Staged, UpstreamReport};
 use wormway_tls::Certificates;
 
+use crate::auth::{Consumers, PasswordChecks};
 use crate::health::UpstreamHealth;
 use crate::probe::Prober;
 use crate::route::CompiledRoute;
@@ -35,6 +36,8 @@ pub(crate) struct GatewaySnapshot {
     upstreams: BTreeMap<Name, Arc<CompiledUpstream>>,
     /// The traffic of all requests, kept by every next snapshot.
     pub(crate) all: Arc<Window>,
+    /// The checks of Basic passwords, kept by every next snapshot.
+    checks: Arc<PasswordChecks>,
 }
 
 impl GatewaySnapshot {
@@ -67,8 +70,9 @@ impl GatewaySnapshot {
 
     /// Compiles `config`, reusing the upstream runtimes of `self` whose targets, balancing and
     /// health checks did not change, and the traffic windows of the routes and upstreams that
-    /// keep their names. The TLS files of upstreams are read again, relative to the
-    /// configuration file of `certificates`; `prober` makes the probes of the health checks.
+    /// keep their names. The TLS files of upstreams and the keys of the JWT settings are read
+    /// again, relative to the configuration file of `certificates`; `prober` makes the probes of
+    /// the health checks.
     async fn compile(
         &self,
         config: &Config,
@@ -76,6 +80,7 @@ impl GatewaySnapshot {
         prober: &Arc<Prober>,
     ) -> Result<Self, Vec<Issue>> {
         let mut issues = Vec::new();
+        let consumers = Consumers::load(config, certificates.base(), self.checks.clone()).await;
         let mut upstreams = BTreeMap::new();
         for (name, settings) in &config.upstreams {
             let tls = match &settings.tls {
@@ -105,14 +110,19 @@ impl GatewaySnapshot {
                 Err(problems) => issues.extend(problems),
             }
         }
-        if !issues.is_empty() {
-            return Err(issues);
-        }
+        let consumers = match consumers {
+            Ok(consumers) if issues.is_empty() => Arc::new(consumers),
+            Ok(_) => return Err(issues),
+            Err(problems) => {
+                issues.extend(problems);
+                return Err(issues);
+            }
+        };
 
         let mut routes = Vec::new();
         for (name, route) in &config.routes {
             let running = self.routes.get(name).map(|running| &**running);
-            match CompiledRoute::new(name, route, &upstreams, running) {
+            match CompiledRoute::new(name, route, &upstreams, &consumers, running) {
                 Ok(compiled) => routes.push((route, Arc::new(compiled))),
                 Err(issue) => issues.push(issue),
             }
@@ -141,6 +151,7 @@ impl GatewaySnapshot {
             routes,
             upstreams,
             all: self.all.clone(),
+            checks: self.checks.clone(),
         })
     }
 

@@ -1,15 +1,16 @@
 //! The configuration model: the types behind `wormway.toml`, parsing and validation.
 //!
 //! Static settings (`server`, `log`, `admin`, `storage`, `config` and `acme`) are read once at
-//! startup. Dynamic settings (`listeners`, `routes`, `upstreams`, `certificates` and the entity
-//! tables added later) come from the database or from this file, as chosen by `config.source`, and
-//! can change while running.
+//! startup. Dynamic settings (`listeners`, `routes`, `upstreams`, `certificates`, `consumers` and
+//! `jwt`) come from the database or from this file, as chosen by `config.source`, and can change
+//! while running.
 //!
 //! [`Config::from_toml`] loads a configuration in two stages. Parsing checks the syntax and the
 //! structure and stops at the first error, which carries a line and column. Validation checks
 //! the rules that span fields and reports every problem, each with the path of its setting.
 
 mod action;
+mod auth;
 mod certificate;
 mod duration;
 mod error;
@@ -18,6 +19,7 @@ mod limit;
 mod listener;
 mod name;
 mod route;
+mod secret;
 mod settings;
 mod size;
 mod time_format;
@@ -29,7 +31,11 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 pub use action::{Action, HeaderRules, Redirect, RedirectPart, Respond, Rewrite};
-pub use certificate::{AcmeCertificate, AcmeChallenge, Certificate, DnsProvider, Secret};
+pub use auth::{
+    ApiKeyAuth, ApiKeyHash, Consumer, InvalidApiKeyHash, InvalidPasswordHash, Jwt, JwtAlgorithm,
+    PasswordHash, RouteAuth,
+};
+pub use certificate::{AcmeCertificate, AcmeChallenge, Certificate, DnsProvider};
 pub use duration::{Duration, ParseDurationError};
 pub use error::{ConfigError, Issue, ParseError, Position};
 pub use http::{
@@ -42,6 +48,7 @@ pub use route::{
     HeaderCondition, HostPattern, InvalidHostPattern, InvalidRegex, PathPattern, PathRegex, Route,
     RouteMatch,
 };
+pub use secret::Secret;
 pub use settings::{
     AccessLogFormat, AccessLogSettings, AcmeSettings, AdminSettings, ConfigSettings, ConfigSource,
     LogFormat, LogSettings, ServerSettings, StorageSettings, TimeZone,
@@ -93,6 +100,14 @@ pub struct Config {
     /// `"file"`.
     #[serde(default)]
     pub certificates: BTreeMap<Name, Certificate>,
+    /// Consumers by name: the clients that routes with authentication let through. Dynamic:
+    /// read from this file only when `config.source` is `"file"`.
+    #[serde(default)]
+    pub consumers: BTreeMap<Name, Consumer>,
+    /// Settings that check JWTs, by name, for the authentication of routes. Dynamic: read from
+    /// this file only when `config.source` is `"file"`.
+    #[serde(default)]
+    pub jwt: BTreeMap<Name, Jwt>,
 }
 
 impl Config {
@@ -133,6 +148,8 @@ impl Config {
             routes: self.routes,
             upstreams: self.upstreams,
             certificates: self.certificates,
+            consumers: self.consumers,
+            jwt: self.jwt,
         }
     }
 
@@ -143,6 +160,8 @@ impl Config {
         self.routes = dynamic.routes;
         self.upstreams = dynamic.upstreams;
         self.certificates = dynamic.certificates;
+        self.consumers = dynamic.consumers;
+        self.jwt = dynamic.jwt;
     }
 
     /// Whether `other` has the same static settings.
@@ -173,6 +192,12 @@ pub struct DynamicConfig {
     /// TLS certificates by name.
     #[serde(default)]
     pub certificates: BTreeMap<Name, Certificate>,
+    /// Consumers by name.
+    #[serde(default)]
+    pub consumers: BTreeMap<Name, Consumer>,
+    /// Settings that check JWTs, by name.
+    #[serde(default)]
+    pub jwt: BTreeMap<Name, Jwt>,
 }
 
 impl DynamicConfig {
@@ -518,7 +543,7 @@ mod tests {
     /// rejected there too.
     #[test]
     fn dynamic_settings_round_trip_through_json() {
-        let json = r#"{"listeners":{"web":{"listen":["127.0.0.1:8080"],"protocol":"http"}},"routes":{"api":{"match":{"paths":["/api/"]},"upstream":"api"}},"upstreams":{"api":{"targets":["127.0.0.1:9000"]}},"certificates":{}}"#;
+        let json = r#"{"listeners":{"web":{"listen":["127.0.0.1:8080"],"protocol":"http"}},"routes":{"api":{"match":{"paths":["/api/"]},"upstream":"api"}},"upstreams":{"api":{"targets":["127.0.0.1:9000"]}},"certificates":{},"consumers":{},"jwt":{}}"#;
         let dynamic: DynamicConfig = serde_json::from_str(json).unwrap();
         assert_eq!(serde_json::to_string(&dynamic).unwrap(), json);
         assert!(serde_json::from_str::<DynamicConfig>(r#"{"route":{}}"#).is_err());
@@ -528,9 +553,13 @@ mod tests {
     /// configuration file gives its dynamic settings.
     #[test]
     fn dynamic_settings_round_trip_through_toml() {
-        let text = "version = 1\n[server]\nthreads = 4\n[listeners.web]\nlisten = [\"127.0.0.1:8080\"]\nprotocol = \"http\"\n";
+        let text = "version = 1\n[server]\nthreads = 4\n[listeners.web]\nlisten = [\"127.0.0.1:8080\"]\nprotocol = \"http\"\n[consumers.alice]\n[jwt.main]\nalgorithm = \"HS256\"\nsecret = { env = \"JWT_SECRET\" }\n";
         let dynamic = DynamicConfig::from_toml(text).unwrap();
         assert_eq!(dynamic, Config::from_toml(text).unwrap().into_dynamic());
+        assert_eq!((dynamic.consumers.len(), dynamic.jwt.len()), (1, 1));
+        let mut config = Config::from_toml("version = 1").unwrap();
+        config.set_dynamic(dynamic.clone());
+        assert_eq!((config.consumers.len(), config.jwt.len()), (1, 1));
 
         let written = dynamic.to_toml().unwrap();
         assert!(written.starts_with("version = 1\n"), "{written}");

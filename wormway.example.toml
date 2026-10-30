@@ -77,10 +77,17 @@ response_headers = { set = { "Strict-Transport-Security" = "max-age=63072000" } 
 compress = true                          # gzip, br or zstd, the first the client accepts
 timeouts = { read = "5m" }               # read and write, in place of those of the upstream
 # Each client may send 100 requests at once and gets them back evenly over the second; more get
-# 429 with Retry-After. key: "client_ip" (default), "route" (all together) or { header = "X-Tenant" }.
+# 429 with Retry-After. key: "client_ip" (default), "route" (all together), { header = "X-Tenant" },
+# or "consumer", which counts after auth.
 rate_limit = { requests = 100, per = "1s", key = "client_ip" }
 concurrency_limit = 500                  # more requests in progress get 503 right away
 max_body_size = "10MiB"                  # B, KiB, MiB or GiB; larger bodies get 413
+# Requests must show the credentials of a consumer, looked for in this order: an API key in
+# X-API-Key (api_key = { header = "..." } for another header), a JWT in "Authorization: Bearer",
+# then Basic authentication; the first one sent decides. Without any, or with wrong ones, 401;
+# consumers that `consumers` leaves out, 403. The upstream learns the consumer from X-Consumer,
+# which Wormway removes from what clients send.
+auth = { api_key = true, jwt = "main", basic = true, consumers = ["alice", "billing"] }
 
 # Instead of an upstream, a route can answer with a redirect, where {host} and {uri} come from
 # the request (status 301, 302, 303, 307 or 308, default 302), or with a fixed response.
@@ -134,3 +141,21 @@ acme = { domains = ["example.com", "www.example.com"] }
 # The configuration refers to the token, { env = "NAME" } or { file = "path" }, never holds it.
 [certificates.wildcard]
 acme = { domains = ["*.example.com"], challenge = "dns-01", dns = { provider = "cloudflare", api_token = { env = "CLOUDFLARE_API_TOKEN" } } }
+
+# The clients of routes with auth. Only hashes are kept: the password as htpasswd -nbB alice
+# <password> prints it after the colon, for Basic authentication with the name of the consumer;
+# each API key as printf %s "$KEY" | shasum -a 256 prints it.
+[consumers.alice]
+password_hash = "$2y$05$OIJr/ChnzQmxxSUrhXIs3OLzBkutUd/3ZoROBDs230b86rPkUV.GG"
+api_keys = ["sha256:c14cb8906b06c260910200e295695e574323eacc20b9820ea5f6e54390ea27a5"]
+
+# Checks the JWTs of an issuer: the signature with this algorithm only, exp (required) and nbf,
+# with a minute of leeway, and iss and aud when issuer and audience are set. The consumer is the
+# value of consumer_claim, which need not name a consumer above.
+[jwt.main]
+algorithm = "RS256"                      # HS256, HS384, HS512, RS*, PS*, ES256, ES384 or EdDSA
+public_key = "keys/jwt.pub"              # PEM, relative to this file; read on every change
+# secret = { env = "JWT_SECRET" }        # in place of public_key for the HS algorithms
+issuer = "https://auth.example.com"
+audience = ["api"]
+consumer_claim = "sub"                   # default

@@ -25,6 +25,10 @@ anyhow = "1.0.104"
 arc-swap = "1.9.3"
 async-trait = "0.1.92"
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "query", "tokio", "tracing"] }
+# The credentials of Basic authentication. The version that others bring in already.
+base64 = "0.22.1"
+# The password hashes of consumers, as htpasswd -B writes them.
+bcrypt = "0.19.3"
 bytes = "1.12.1"
 # Times of the logs: strftime patterns and the local time zone. Pingora brings it in already.
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
@@ -41,6 +45,8 @@ hyper-rustls = { version = "0.27.7", default-features = false, features = ["aws-
 hyper-util = { version = "0.1.21", features = ["client-legacy", "http1", "tokio"] }
 # ACME, with the key and CSR of each certificate (rcgen) and renewal information (time).
 instant-acme = { version = "0.8.5", features = ["rcgen", "time"] }
+# JWTs of the authentication of routes, checked with aws-lc-rs like the rest of the cryptography.
+jsonwebtoken = { version = "11.1.0", features = ["aws_lc_rs"] }
 metrics = "0.24.6"
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 # Pinned: every 0.x release breaks the API. Upgrades happen between milestones.
@@ -57,6 +63,8 @@ rustls-pki-types = "1.15.1"
 schemars = "1.2.3"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+# The hashes of API keys. The version that others bring in already.
+sha2 = "0.10.9"
 sqlx = { version = "0.9.0", default-features = false, features = ["macros", "migrate", "runtime-tokio", "sqlite-bundled"] }
 subtle = "2.6.1"
 tempfile = "3.27.0"

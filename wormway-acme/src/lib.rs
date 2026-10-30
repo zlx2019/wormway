@@ -15,7 +15,6 @@ mod https;
 mod issue;
 mod manager;
 mod schedule;
-mod secret;
 
 use std::path::PathBuf;
 use std::sync::Arc;

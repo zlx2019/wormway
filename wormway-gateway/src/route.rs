@@ -9,6 +9,7 @@ use wormway_core::config::{
     Action, ByteSize, Issue, Name, Redirect, RedirectPart, Respond, Rewrite, Route, RouteTimeouts,
 };
 
+use crate::auth::{Authentication, Consumers};
 use crate::headers::HeaderEdits;
 use crate::limit::RateLimiter;
 use crate::stats::Window;
@@ -43,6 +44,8 @@ pub(crate) struct CompiledRoute {
     pub(crate) inflight: Arc<AtomicUsize>,
     /// The largest request body in bytes, if limited.
     pub(crate) max_body_size: Option<u64>,
+    /// The authentication, if the route asks for one.
+    pub(crate) auth: Option<Authentication>,
 }
 
 /// What a route does with a request.
@@ -56,14 +59,15 @@ pub(crate) enum Handler {
 }
 
 impl CompiledRoute {
-    /// Compiles route `name`, with its upstream from `upstreams`. It keeps the traffic and the
-    /// requests in progress of `running`, the route of the same name in effect, and its rate
-    /// limit if the settings are the same. The route passed validation, so this fails only if
-    /// the validation rules miss a case.
+    /// Compiles route `name`, with its upstream from `upstreams` and its authentication with
+    /// `consumers`. It keeps the traffic and the requests in progress of `running`, the route of
+    /// the same name in effect, and its rate limit if the settings are the same. The route
+    /// passed validation, so this fails only if the validation rules miss a case.
     pub(crate) fn new(
         name: &Name,
         route: &Route,
         upstreams: &BTreeMap<Name, Arc<CompiledUpstream>>,
+        consumers: &Arc<Consumers>,
         running: Option<&CompiledRoute>,
     ) -> Result<Self, Issue> {
         let at = |field: &str| format!("routes.{name}{field}");
@@ -96,6 +100,11 @@ impl CompiledRoute {
                 .cloned()
                 .unwrap_or_else(|| Arc::new(RateLimiter::new(settings)))
         });
+        let auth = route
+            .auth
+            .as_ref()
+            .map(|auth| Authentication::new(name, auth, consumers))
+            .transpose()?;
         Ok(Self {
             name: name.clone(),
             handler,
@@ -110,6 +119,7 @@ impl CompiledRoute {
             concurrency_limit: route.concurrency_limit.map(|limit| limit as usize),
             inflight: running.map_or_else(Arc::default, |running| running.inflight.clone()),
             max_body_size: route.max_body_size.map(ByteSize::bytes),
+            auth,
         })
     }
 

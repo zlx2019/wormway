@@ -63,6 +63,12 @@ impl Certificates {
         }
     }
 
+    /// Returns the directory that relative paths are resolved against: that of the
+    /// configuration file.
+    pub fn base(&self) -> &Path {
+        &self.base
+    }
+
     /// Registers the engine that loads the certificates of every configuration with
     /// `services`, and the report of the certificates in effect.
     pub fn register(&self, services: &mut Services) {

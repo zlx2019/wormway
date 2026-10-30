@@ -2,13 +2,14 @@
 //! installs those issued before when the change commits.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::Arc;
 
-use wormway_core::config::{AcmeChallenge, Config, DnsProvider, Issue, Name, Protocol};
+use wormway_core::config::{AcmeChallenge, Config, DnsProvider, Issue, Name, Protocol, Secret};
 use wormway_runtime::{BoxFuture, Engine, Staged};
 use wormway_tls::IssuedCertificate;
 
-use crate::{Shared, secret};
+use crate::Shared;
 
 /// The certificates that the configuration in effect gets through ACME.
 #[derive(Default)]
@@ -72,7 +73,7 @@ impl Engine for AcmeEngine {
                 };
                 let dns = match &acme.dns {
                     Some(DnsProvider::Cloudflare { api_token }) => {
-                        match secret::read(api_token, &shared.base).await {
+                        match read_secret(api_token, &shared.base).await {
                             Ok(token) => Some(Dns::Cloudflare { token }),
                             Err(problem) => {
                                 let at = format!("certificates.{name}.acme.dns.api_token");
@@ -115,6 +116,14 @@ impl Engine for AcmeEngine {
             Ok(staged)
         })
     }
+}
+
+/// Reads `secret`, with a path relative to `base`, on the blocking pool.
+async fn read_secret(secret: &Secret, base: &Path) -> Result<String, String> {
+    let (secret, base) = (secret.clone(), base.to_owned());
+    tokio::task::spawn_blocking(move || secret.read(&base))
+        .await
+        .map_err(|error| format!("cannot read the secret: {error}"))?
 }
 
 /// The ACME certificates of a change, waiting for it to commit.

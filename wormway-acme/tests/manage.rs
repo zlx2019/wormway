@@ -113,6 +113,27 @@ async fn installs_stored_certificates() {
     }
 }
 
+/// The token of a DNS provider may come from a file, relative to the configuration file.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reads_tokens_from_files() {
+    let dir = tempfile::tempdir().expect("directory");
+    std::fs::write(dir.path().join("token"), "a-token\n").expect("write the token");
+    let config = config(
+        r#"
+        [certificates.wild]
+        acme = { domains = ["*.site.test"], challenge = "dns-01", dns = { provider = "cloudflare", api_token = { file = "token" } } }
+    "#,
+    );
+    let mut services = Services::new();
+    let certificates = Certificates::new(dir.path());
+    certificates.register(&mut services);
+    let acme = Acme::new(&config.acme, certificates, Memory::default(), dir.path());
+    acme.register(&mut services);
+    if let Err(error) = Server::start(Handle::current(), services, config).await {
+        panic!("the token should be read: {error:?}");
+    }
+}
+
 /// When the configuration drops a certificate, the manager stops presenting it and removes it
 /// from storage.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

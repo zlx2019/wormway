@@ -82,8 +82,10 @@ pub(crate) struct RequestContext {
     admitted: Option<Inflight>,
     /// Bytes of the request body read so far, while the route limits its size.
     body_bytes: u64,
-    /// Why the limits of the route turned the request away, if they did.
+    /// Why the limits or the authentication of the route turned the request away, if they did.
     turned_away: Option<&'static str>,
+    /// The consumer that the authentication of the route found.
+    consumer: Option<String>,
 }
 
 impl Proxy {
@@ -147,6 +149,7 @@ impl ProxyHttp for Proxy {
             admitted: None,
             body_bytes: 0,
             turned_away: None,
+            consumer: None,
         }
     }
 
@@ -181,8 +184,8 @@ impl ProxyHttp for Proxy {
     }
 
     /// Answers the requests that do not go to an upstream: HTTP-01 challenges, 404 without a
-    /// route, requests that the limits of their route turn away, and the redirects and fixed
-    /// responses of routes.
+    /// route, requests that the limits or the authentication of their route turn away, and the
+    /// redirects and fixed responses of routes.
     async fn request_filter(
         &self,
         session: &mut Session,
@@ -196,7 +199,7 @@ impl ProxyHttp for Proxy {
             session.respond_error(404).await?;
             return Ok(true);
         };
-        if let Some(rejection) = admit(session, ctx, &route) {
+        if let Some(rejection) = admit(session, ctx, &route).await {
             ctx.turned_away = Some(rejection.reason());
             tracing::debug!(
                 listener = %self.listener,
@@ -205,7 +208,7 @@ impl ProxyHttp for Proxy {
                 "request turned away: {}",
                 rejection.reason()
             );
-            turn_away(session, &rejection, &route.response_headers).await?;
+            turn_away(session, &rejection, &route).await?;
             return Ok(true);
         }
         match &route.handler {
@@ -457,7 +460,14 @@ impl ProxyHttp for Proxy {
             .client_addr()
             .and_then(|addr| addr.as_inet())
             .map(|addr| addr.ip());
-        headers::set_forwarded(upstream_request, client, self.tls, &ctx.request_id)?;
+        let consumer = ctx.consumer.as_deref();
+        headers::set_forwarded(
+            upstream_request,
+            client,
+            self.tls,
+            &ctx.request_id,
+            consumer,
+        )?;
         let Some(route) = &ctx.route else {
             return Ok(());
         };
@@ -580,6 +590,7 @@ impl Proxy {
                 .and_then(|target| target.addr.as_inet())
                 .copied(),
             upstream_duration: ctx.upstream_duration,
+            consumer: ctx.consumer.clone(),
             request_id: ctx.request_id.as_str().to_owned(),
             user_agent: header("user-agent"),
             referer: header("referer"),
@@ -674,7 +685,7 @@ async fn respond(
     Ok(())
 }
 
-/// Why the limits of a route turn a request away.
+/// Why the limits or the authentication of a route turn a request away.
 enum Rejection {
     /// The route has as many requests in progress as it allows: 503.
     Busy,
@@ -682,6 +693,11 @@ enum Rejection {
     TooLarge,
     /// The key of the request has used up its requests for now: 429, with the time to wait.
     Limited(Duration),
+    /// The request shows no credentials of a consumer in a way the route takes, or wrong ones:
+    /// 401, with why.
+    Unauthenticated(&'static str),
+    /// The consumer of the request may not use the route: 403.
+    Forbidden,
 }
 
 impl Rejection {
@@ -691,6 +707,8 @@ impl Rejection {
             Self::Busy => 503,
             Self::TooLarge => 413,
             Self::Limited(_) => 429,
+            Self::Unauthenticated(_) => 401,
+            Self::Forbidden => 403,
         }
     }
 
@@ -700,13 +718,21 @@ impl Rejection {
             Self::Busy => "concurrency limit reached",
             Self::TooLarge => "request body larger than max_body_size",
             Self::Limited(_) => "rate limit reached",
+            Self::Unauthenticated(reason) => reason,
+            Self::Forbidden => "consumer not allowed",
         }
     }
 }
 
-/// Checks the limits of `route` for the request, in this order: the requests in progress, the
-/// length of the body, and the rate. Returns why the request is turned away, if it is.
-fn admit(session: &Session, ctx: &mut RequestContext, route: &CompiledRoute) -> Option<Rejection> {
+/// Checks the limits and the authentication of `route` for the request, in this order: the
+/// requests in progress, the length of the body, the rate unless it counts by consumer, the
+/// credentials, the consumers that the route lets through, and the rate by consumer. Returns
+/// why the request is turned away, if it is.
+async fn admit(
+    session: &Session,
+    ctx: &mut RequestContext,
+    route: &CompiledRoute,
+) -> Option<Rejection> {
     if let Some(limit) = route.concurrency_limit {
         ctx.admitted = Inflight::within(&route.inflight, limit);
         if ctx.admitted.is_none() {
@@ -718,44 +744,88 @@ fn admit(session: &Session, ctx: &mut RequestContext, route: &CompiledRoute) -> 
     {
         return Some(Rejection::TooLarge);
     }
-    if let Some(limiter) = &route.rate_limit
-        && let Err(wait) = limiter.check(&rate_key(session, limiter.key()), Instant::now())
-    {
-        telemetry::rate_limited(&route.name);
-        return Some(Rejection::Limited(wait));
+    let by_consumer = route
+        .rate_limit
+        .as_ref()
+        .is_some_and(|limiter| *limiter.key() == RateLimitKey::Consumer);
+    if !by_consumer && let Some(rejection) = limit_rate(session, route, None) {
+        return Some(rejection);
+    }
+    if let Some(auth) = &route.auth {
+        let consumer = match auth.check(session.req_header()).await {
+            Ok(consumer) => consumer,
+            Err(reason) => return Some(Rejection::Unauthenticated(reason)),
+        };
+        let allowed = auth.allows(&consumer);
+        ctx.consumer = Some(consumer);
+        if !allowed {
+            return Some(Rejection::Forbidden);
+        }
+    }
+    if by_consumer {
+        return limit_rate(session, route, ctx.consumer.as_deref());
     }
     None
 }
 
-/// Answers a request that the limits of its route turn away, with the header changes of the
-/// route, such as the CORS headers that let browsers read the answer. Pingora closes the
+/// Counts the request against the rate limit of `route`, if it has one, with `consumer` as the
+/// consumer of the request. Returns the rejection when its key has used up its requests.
+fn limit_rate(
+    session: &Session,
+    route: &CompiledRoute,
+    consumer: Option<&str>,
+) -> Option<Rejection> {
+    let limiter = route.rate_limit.as_ref()?;
+    let wait = limiter
+        .check(&rate_key(session, limiter.key(), consumer), Instant::now())
+        .err()?;
+    telemetry::rate_limited(&route.name);
+    Some(Rejection::Limited(wait))
+}
+
+/// Answers a request that the limits or the authentication of `route` turn away, with the
+/// header changes of the route, such as the CORS headers that let browsers read the answer, and
+/// with the ways to authenticate when credentials are missing or wrong. Pingora closes the
 /// connection afterwards if the request body is still coming, rather than reading it.
 async fn turn_away(
     session: &mut Session,
     rejection: &Rejection,
-    response_headers: &HeaderEdits,
+    route: &CompiledRoute,
 ) -> pingora::Result<()> {
-    let mut response = ResponseHeader::build(rejection.status(), Some(3))?;
+    let mut response = ResponseHeader::build(rejection.status(), Some(4))?;
     response.insert_header("Content-Length", "0")?;
-    if let Rejection::Limited(wait) = rejection {
-        response.insert_header("Retry-After", limit::retry_after(*wait).to_string())?;
+    match rejection {
+        Rejection::Limited(wait) => {
+            response.insert_header("Retry-After", limit::retry_after(*wait).to_string())?;
+        }
+        Rejection::Unauthenticated(_) => {
+            for challenge in route.auth.iter().flat_map(|auth| &auth.challenges) {
+                response.append_header("WWW-Authenticate", challenge.clone())?;
+            }
+        }
+        Rejection::Busy | Rejection::TooLarge | Rejection::Forbidden => {}
     }
-    response_headers.apply(&mut response)?;
+    route.response_headers.apply(&mut response)?;
     session
         .write_response_header(Box::new(response), true)
         .await
 }
 
 /// Returns what the rate limit counts the request by: the client IP address, the value of a
-/// header, or the client IP address when the request does not have the header.
-fn rate_key<'a>(session: &'a Session, key: &RateLimitKey) -> Key<'a> {
-    let header = match key {
+/// header, `consumer`, or the client IP address when the request has no such value.
+fn rate_key<'a>(session: &'a Session, key: &RateLimitKey, consumer: Option<&'a str>) -> Key<'a> {
+    let value = match key {
         RateLimitKey::Route => return Key::Route,
-        RateLimitKey::Header(name) => session.req_header().headers.get(name.as_str()),
+        RateLimitKey::Header(name) => session
+            .req_header()
+            .headers
+            .get(name.as_str())
+            .map(HeaderValue::as_bytes),
+        RateLimitKey::Consumer => consumer.map(str::as_bytes),
         RateLimitKey::ClientIp => None,
     };
-    match header {
-        Some(value) => Key::Value(value.as_bytes()),
+    match value {
+        Some(value) => Key::Value(value),
         // Without an IP address, as over a Unix socket, the requests count together.
         None => client_ip(session).map_or(Key::Route, Key::Ip),
     }

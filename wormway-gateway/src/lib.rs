@@ -12,6 +12,7 @@
 //! `metrics` crate. Pingora types do not appear in the public API.
 
 mod access_log;
+mod auth;
 mod compress;
 mod headers;
 mod health;

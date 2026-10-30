@@ -117,12 +117,14 @@ impl EditHeaders for ResponseHeader {
 /// Sets the headers that tell the upstream about the client, replacing those the client sent,
 /// which nothing vouches for: `X-Forwarded-For` and `X-Real-IP` with the address of `client`,
 /// `X-Forwarded-Proto` with `https` if the listener has TLS, `X-Forwarded-Host` with the host
-/// the client asked for, and `X-Request-Id` with `id`.
+/// the client asked for, `X-Request-Id` with `id`, and `X-Consumer` with `consumer`, the consumer
+/// that the authentication of the route found, if any.
 pub(crate) fn set_forwarded(
     request: &mut RequestHeader,
     client: Option<IpAddr>,
     tls: bool,
     id: &RequestId,
+    consumer: Option<&str>,
 ) -> pingora::Result<()> {
     match client {
         Some(ip) => {
@@ -149,6 +151,12 @@ pub(crate) fn set_forwarded(
         Some(host) => request.insert_header("X-Forwarded-Host", host)?,
         None => {
             request.remove_header("x-forwarded-host");
+        }
+    }
+    match consumer {
+        Some(consumer) => request.insert_header("X-Consumer", consumer)?,
+        None => {
+            request.remove_header("x-consumer");
         }
     }
     request.insert_header("X-Request-Id", id.as_str())
@@ -181,7 +189,7 @@ impl RequestId {
 }
 
 /// The random generator of aws-lc, through the crypto provider of rustls.
-fn random() -> &'static dyn SecureRandom {
+pub(crate) fn random() -> &'static dyn SecureRandom {
     static RANDOM: LazyLock<&'static dyn SecureRandom> =
         LazyLock::new(|| rustls::crypto::aws_lc_rs::default_provider().secure_random);
     *RANDOM
@@ -228,7 +236,7 @@ mod tests {
     }
 
     /// The forwarding headers replace those of the client, and the host comes from the Host
-    /// header.
+    /// header; the consumer replaces the one the client claims, or removes it.
     #[test]
     fn replaces_forwarding_headers() {
         let mut request = RequestHeader::build("GET", b"/", None).unwrap();
@@ -236,15 +244,20 @@ mod tests {
         request.insert_header("X-Forwarded-For", "6.6.6.6").unwrap();
         request.insert_header("X-Real-IP", "6.6.6.6").unwrap();
         request.insert_header("X-Request-Id", "chosen").unwrap();
+        request.insert_header("X-Consumer", "mallory").unwrap();
         let id = RequestId::new();
         let mapped: IpAddr = "::ffff:10.0.0.1".parse().unwrap();
-        set_forwarded(&mut request, Some(mapped), true, &id).unwrap();
+        set_forwarded(&mut request, Some(mapped), true, &id, Some("alice")).unwrap();
         let value = |name: &str| request.headers[name].to_str().unwrap().to_owned();
         assert_eq!(value("x-forwarded-for"), "10.0.0.1");
         assert_eq!(value("x-real-ip"), "10.0.0.1");
         assert_eq!(value("x-forwarded-proto"), "https");
         assert_eq!(value("x-forwarded-host"), "example.com:8080");
         assert_eq!(value("x-request-id"), id.as_str());
+        assert_eq!(value("x-consumer"), "alice");
+
+        set_forwarded(&mut request, Some(mapped), true, &id, None).unwrap();
+        assert!(!request.headers.contains_key("x-consumer"));
     }
 
     /// IDs are 32 lowercase hex digits and differ between requests.

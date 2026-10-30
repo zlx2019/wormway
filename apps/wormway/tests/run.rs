@@ -351,6 +351,20 @@ fn reports_invalid_files() {
     assert_eq!(wormway.exit_code(), Some(1));
 }
 
+/// A JWT secret that cannot be read stops the start, with its setting and the reason.
+#[test]
+fn reports_unreadable_jwt_secrets() {
+    let config = format!(
+        "{EMPTY}[jwt.main]\nalgorithm = \"HS256\"\nsecret = {{ env = \"WORMWAY_TEST_JWT_SECRET_UNSET\" }}\n"
+    );
+    let path = temp_config("run-jwt-secret", &config);
+    let mut wormway = Wormway::start(&path);
+    wormway.wait_for(
+        "Error: invalid configuration: jwt.main.secret: environment variable WORMWAY_TEST_JWT_SECRET_UNSET is not set",
+    );
+    assert_eq!(wormway.exit_code(), Some(1));
+}
+
 /// The Admin API answers health checks without a token and everything else with it. The token
 /// file is created on first start, readable by its owner only.
 #[test]

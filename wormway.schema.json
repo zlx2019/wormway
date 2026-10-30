@@ -137,6 +137,27 @@
       },
       "type": "object"
     },
+    "ApiKeyAuth": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "header": {
+              "pattern": "^[A-Za-z0-9!#$%&'*+.^_`|~-]+$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "header"
+          ],
+          "type": "object"
+        }
+      ],
+      "description": "true for API keys in header X-API-Key, or { header = \"...\" } for another header."
+    },
     "Balance": {
       "description": "How requests are spread over the targets of an upstream. Every way follows the weights.",
       "oneOf": [
@@ -224,6 +245,29 @@
           "type": "string"
         }
       ]
+    },
+    "Consumer": {
+      "additionalProperties": false,
+      "description": "A client of the routes with authentication, known by its name. With a password it signs in\nwith Basic authentication, its name as the user name; with API keys it sends one of them in\na header. Only hashes are kept, never the passwords and keys themselves.",
+      "properties": {
+        "api_keys": {
+          "description": "The SHA-256 of each API key, as `sha256:` and 64 hex digits, such as\n`printf %s \"$KEY\" | shasum -a 256` prints.",
+          "items": {
+            "pattern": "^sha256:[0-9A-Fa-f]{64}$",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "password_hash": {
+          "description": "The bcrypt hash of the password, as `htpasswd -nbB <name> <password>` prints it after\nthe colon, such as `\"$2y$05$...\"`.",
+          "pattern": "^\\$2[abxy]\\$(0[4-9]|[12][0-9]|3[01])\\$[./A-Za-z0-9]{53}$",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
     },
     "DnsProvider": {
       "description": "A DNS provider whose API publishes the TXT records of `dns-01`.",
@@ -447,6 +491,128 @@
         }
       },
       "type": "object"
+    },
+    "Jwt": {
+      "additionalProperties": false,
+      "description": "How the JWTs of an issuer are checked: their signature, with the algorithm and the key of\nthese settings, and their claims. Tokens must carry `exp` and must not have expired, nor be\nused before `nbf` if they carry it, with 60 seconds of leeway for clocks.",
+      "properties": {
+        "algorithm": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/JwtAlgorithm"
+            }
+          ],
+          "description": "The algorithm that tokens must be signed with. Tokens that name another one are\nrejected, so that a public key never passes for a shared secret."
+        },
+        "audience": {
+          "description": "Audiences, one of which tokens must name in `aud`. Without it, any audience.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "consumer_claim": {
+          "description": "The claim whose value is the consumer, such as a user ID. Default: `\"sub\"`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "issuer": {
+          "description": "The issuer that tokens must name in `iss`. Without it, any issuer.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "public_key": {
+          "description": "PEM file with the public key, or with a certificate of it, for the RS, PS, ES and EdDSA\nalgorithms. Relative to the configuration file, and read whenever the configuration is\napplied.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "secret": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Secret"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The shared secret of the HS algorithms: `{ env = \"NAME\" }` or `{ file = \"path\" }`."
+        }
+      },
+      "required": [
+        "algorithm"
+      ],
+      "type": "object"
+    },
+    "JwtAlgorithm": {
+      "description": "A signature algorithm of JWTs.",
+      "oneOf": [
+        {
+          "const": "HS256",
+          "description": "HMAC with SHA-256, with a shared secret.",
+          "type": "string"
+        },
+        {
+          "const": "HS384",
+          "description": "HMAC with SHA-384, with a shared secret.",
+          "type": "string"
+        },
+        {
+          "const": "HS512",
+          "description": "HMAC with SHA-512, with a shared secret.",
+          "type": "string"
+        },
+        {
+          "const": "RS256",
+          "description": "RSASSA-PKCS1-v1_5 with SHA-256, with an RSA public key.",
+          "type": "string"
+        },
+        {
+          "const": "RS384",
+          "description": "RSASSA-PKCS1-v1_5 with SHA-384, with an RSA public key.",
+          "type": "string"
+        },
+        {
+          "const": "RS512",
+          "description": "RSASSA-PKCS1-v1_5 with SHA-512, with an RSA public key.",
+          "type": "string"
+        },
+        {
+          "const": "PS256",
+          "description": "RSASSA-PSS with SHA-256, with an RSA public key.",
+          "type": "string"
+        },
+        {
+          "const": "PS384",
+          "description": "RSASSA-PSS with SHA-384, with an RSA public key.",
+          "type": "string"
+        },
+        {
+          "const": "PS512",
+          "description": "RSASSA-PSS with SHA-512, with an RSA public key.",
+          "type": "string"
+        },
+        {
+          "const": "ES256",
+          "description": "ECDSA with P-256 and SHA-256, with an EC public key.",
+          "type": "string"
+        },
+        {
+          "const": "ES384",
+          "description": "ECDSA with P-384 and SHA-384, with an EC public key.",
+          "type": "string"
+        },
+        {
+          "const": "EdDSA",
+          "description": "Ed25519, with an Ed25519 public key.",
+          "type": "string"
+        }
+      ]
     },
     "Listener": {
       "additionalProperties": false,
@@ -710,6 +876,11 @@
           "type": "object"
         },
         {
+          "const": "consumer",
+          "description": "The consumer that the authentication of the route found. The limit then counts after the\nauthentication, and the others before it.",
+          "type": "string"
+        },
+        {
           "const": "route",
           "description": "Nothing: the requests of the route count together.",
           "type": "string"
@@ -792,6 +963,17 @@
             "boolean",
             "null"
           ]
+        },
+        "auth": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RouteAuth"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Who may use the route: requests must show the credentials of a consumer, such as\n`{ api_key = true, jwt = \"main\" }`, or get 401."
         },
         "compress": {
           "description": "Compress responses with gzip, Brotli or zstd, the first that the client accepts, when\ntheir type is text-like. Streams of server-sent events and gRPC are left alone. Default:\n`false`.",
@@ -908,6 +1090,46 @@
         },
         "upstream": {
           "description": "Upstream that serves the requests.",
+          "pattern": "^[a-z0-9_-]{1,64}$",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "RouteAuth": {
+      "additionalProperties": false,
+      "description": "The authentication of a route. Requests must show the credentials of a consumer in one of\nthe ways that are on, looked for in this order: an API key, a JWT, then Basic\nauthentication; the first that a request carries decides. Requests without credentials, or\nwith wrong ones, get 401; consumers that `consumers` leaves out get 403. The upstream learns\nthe consumer from header `X-Consumer`, which Wormway removes from every request that arrives\nwith one.",
+      "properties": {
+        "api_key": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ApiKeyAuth"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "An API key of a consumer: `true` for header `X-API-Key`, or `{ header = \"...\" }` for\nanother header."
+        },
+        "basic": {
+          "description": "Basic authentication, with the name and the password of a consumer. Default: `false`.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "consumers": {
+          "description": "The consumers that may pass: names of consumers, or claim values of JWTs. Without it,\nevery consumer.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "jwt": {
+          "description": "A JWT in `Authorization: Bearer`, checked with these JWT settings. Its consumer is the\nvalue of their `consumer_claim`, which need not name a consumer of the configuration.",
           "pattern": "^[a-z0-9_-]{1,64}$",
           "type": [
             "string",
@@ -1357,6 +1579,28 @@
         "source": "db"
       },
       "description": "Where the dynamic settings come from. Static: a restart applies changes."
+    },
+    "consumers": {
+      "additionalProperties": false,
+      "default": {},
+      "description": "Consumers by name: the clients that routes with authentication let through. Dynamic:\nread from this file only when `config.source` is `\"file\"`.",
+      "patternProperties": {
+        "^[a-z0-9_-]{1,64}$": {
+          "$ref": "#/definitions/Consumer"
+        }
+      },
+      "type": "object"
+    },
+    "jwt": {
+      "additionalProperties": false,
+      "default": {},
+      "description": "Settings that check JWTs, by name, for the authentication of routes. Dynamic: read from\nthis file only when `config.source` is `\"file\"`.",
+      "patternProperties": {
+        "^[a-z0-9_-]{1,64}$": {
+          "$ref": "#/definitions/Jwt"
+        }
+      },
+      "type": "object"
     },
     "listeners": {
       "additionalProperties": false,

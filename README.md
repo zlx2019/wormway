@@ -10,7 +10,7 @@ A programmable network traffic proxy **library**, plus a ready-to-run **applicat
 
 | Pillar | What it covers |
 |---|---|
-| Gateway | Reverse proxy, forward proxy and load balancing (HTTP/1.1, HTTP/2, gRPC, WebSocket), TLS with ACME, rate limiting, health checks. The L7 engine is based on [Pingora](https://github.com/cloudflare/pingora). |
+| Gateway | Reverse proxy, forward proxy and load balancing (HTTP/1.1, HTTP/2, gRPC, WebSocket), TLS with ACME, rate limiting, authentication (Basic, API keys, JWT), health checks. The L7 engine is based on [Pingora](https://github.com/cloudflare/pingora). |
 | Proxy protocols | First batch: SOCKS5, HTTP CONNECT, Shadowsocks, Trojan, VLESS, Hysteria2. More protocols later. |
 | Reverse tunnels | Publish services that live behind NAT through the gateway. |
 | Dashboard | A web UI and an Admin API for configuration, certificates, users and traffic. |

@@ -39,6 +39,9 @@ pub enum RateLimitKey {
     /// The value of a request header, such as `{ header = "X-Tenant" }`. Requests without the
     /// header count by the IP address of the client.
     Header(HeaderName),
+    /// The consumer that the authentication of the route found. The limit then counts after the
+    /// authentication, and the others before it.
+    Consumer,
     /// Nothing: the requests of the route count together.
     Route,
 }
@@ -67,6 +70,8 @@ mod tests {
 
         let route = read("requests = 5\nper = \"1m\"\nkey = \"route\"\n").unwrap();
         assert_eq!(route.key(), RateLimitKey::Route);
+        let consumer = read("requests = 5\nper = \"1m\"\nkey = \"consumer\"\n").unwrap();
+        assert_eq!(consumer.key(), RateLimitKey::Consumer);
         let header = read("requests = 5\nper = \"1m\"\nkey = { header = \"X-Tenant\" }\n").unwrap();
         let RateLimitKey::Header(name) = header.key() else {
             panic!("expected a header key, got {:?}", header.key());
