@@ -143,6 +143,41 @@ async fn removes_dropped_certificates() {
     assert!(certificates.issued(&site).is_none());
 }
 
+/// Certificates stored for names that the configuration does not have, such as ones dropped
+/// while Wormway was stopped, are removed when the manager starts; the others stay.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn removes_certificates_dropped_before_the_start() {
+    let storage = Memory::default();
+    let site: Name = "site".parse().expect("name");
+    let old: Name = "old".parse().expect("name");
+    {
+        let mut certificates = storage.certificates.lock().expect("lock");
+        certificates.insert(site.clone(), issued(&["site.test"]));
+        certificates.insert(old.clone(), issued(&["old.test"]));
+    }
+    let text = "[certificates.site]\nacme = { domains = [\"site.test\"] }\n";
+    let (_server, certificates, acme) = start(text, storage.clone()).await;
+    tokio::spawn(acme.run());
+
+    let deadline = Instant::now() + LIMIT;
+    while storage.removed.lock().expect("lock").is_empty() {
+        assert!(Instant::now() < deadline, "the certificate was not removed");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        storage.removed.lock().expect("lock").as_slice(),
+        std::slice::from_ref(&old)
+    );
+    assert!(
+        storage
+            .certificates
+            .lock()
+            .expect("lock")
+            .contains_key(&site)
+    );
+    assert!(certificates.issued(&site).is_some());
+}
+
 /// A change that reads an older certificate from storage leaves a newer one for the same names
 /// installed, such as one that the manager installed meanwhile.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

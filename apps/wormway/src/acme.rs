@@ -63,4 +63,13 @@ impl Storage for AcmeStore {
     fn remove_certificate<'a>(&'a self, name: &'a Name) -> BoxFuture<'a, Result<(), BoxError>> {
         Box::pin(async move { Ok(self.0.remove_acme_certificate(name.as_str()).await?) })
     }
+
+    /// Lists the names of the certificates. Only valid names are ever saved, so a name that
+    /// does not parse cannot come up.
+    fn certificate_names(&self) -> BoxFuture<'_, Result<Vec<Name>, BoxError>> {
+        Box::pin(async move {
+            let names = self.0.acme_certificate_names().await?;
+            Ok(names.iter().filter_map(|name| name.parse().ok()).collect())
+        })
+    }
 }

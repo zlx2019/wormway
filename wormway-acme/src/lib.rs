@@ -59,6 +59,10 @@ pub trait Storage: Send + Sync + 'static {
 
     /// Removes the certificate issued for certificate `name`, if there is one.
     fn remove_certificate<'a>(&'a self, name: &'a Name) -> BoxFuture<'a, Result<(), BoxError>>;
+
+    /// Returns the names of the certificates saved, so that those the configuration no longer
+    /// has are removed, also when they left it while Wormway was stopped.
+    fn certificate_names(&self) -> BoxFuture<'_, Result<Vec<Name>, BoxError>>;
 }
 
 /// A certificate issued through ACME, as kept: what it was ordered for, and its chain and key.

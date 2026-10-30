@@ -271,6 +271,14 @@ impl Store {
             .map(|_| ())
             .map_err(|e| StoreError::new("cannot remove the ACME certificate", e))
     }
+
+    /// Returns the names of the certificates issued through ACME that were saved, in order.
+    pub async fn acme_certificate_names(&self) -> Result<Vec<String>, StoreError> {
+        sqlx::query_scalar("SELECT name FROM acme_certificates ORDER BY name")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| StoreError::new("cannot list the ACME certificates", e))
+    }
 }
 
 /// Creates the database file at `path` if needed, and makes it and the files SQLite keeps
@@ -347,7 +355,7 @@ mod tests {
     }
 
     /// Accounts are kept by directory and certificates by name; saving again replaces them,
-    /// and a removed certificate is gone.
+    /// the names of the certificates come back in order, and a removed certificate is gone.
     #[tokio::test]
     async fn keeps_acme_accounts_and_certificates() {
         let dir = tempfile::tempdir().unwrap();
@@ -373,9 +381,13 @@ mod tests {
         let next = record(&["a.test", "b.test"]);
         store.save_acme_certificate("site", &next).await.unwrap();
         assert_eq!(store.acme_certificate("site").await.unwrap(), Some(next));
+        store.save_acme_certificate("api", &first).await.unwrap();
+        let names = store.acme_certificate_names().await.unwrap();
+        assert_eq!(names, ["api", "site"]);
         store.remove_acme_certificate("site").await.unwrap();
         assert_eq!(store.acme_certificate("site").await.unwrap(), None);
         store.remove_acme_certificate("site").await.unwrap();
+        assert_eq!(store.acme_certificate_names().await.unwrap(), ["api"]);
     }
 
     /// The database holds private keys: a new file is readable by its owner only, and an

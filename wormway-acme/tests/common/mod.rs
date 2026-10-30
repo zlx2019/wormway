@@ -69,4 +69,17 @@ impl Storage for Memory {
             Ok(())
         })
     }
+
+    /// Returns the names of the certificates kept.
+    fn certificate_names(&self) -> BoxFuture<'_, Result<Vec<Name>, BoxError>> {
+        Box::pin(async move {
+            Ok(self
+                .certificates
+                .lock()
+                .expect("lock")
+                .keys()
+                .cloned()
+                .collect())
+        })
+    }
 }

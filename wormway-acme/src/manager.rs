@@ -1,7 +1,7 @@
 //! The manager of the ACME certificates: orders the missing ones, renews the others before they
 //! expire, one at a time, and keeps them installed and stored.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -125,12 +125,24 @@ pub(crate) async fn run(shared: Arc<Shared>, mut desired: watch::Receiver<Arc<De
 /// through ACME, which are uninstalled and removed from storage, and starts afresh on the new
 /// ones and on those whose order changed. The others keep their state, waits after failures
 /// included, so that frequent changes do not run into the limits of the certificate authority.
+/// Stored certificates that the configuration does not have are removed too, for names that
+/// left it before the manager saw them, such as while Wormway was stopped.
 async fn reconcile(shared: &Shared, managed: &mut BTreeMap<Name, Managed>, desired: &Desired) {
-    let gone: Vec<Name> = managed
+    let mut gone: BTreeSet<Name> = managed
         .keys()
         .filter(|name| !desired.orders.contains_key(*name))
         .cloned()
         .collect();
+    match shared.storage.certificate_names().await {
+        Ok(stored) => gone.extend(
+            stored
+                .into_iter()
+                .filter(|name| !desired.orders.contains_key(name)),
+        ),
+        Err(error) => {
+            warn!("cannot list the stored certificates: {}", reason(&*error));
+        }
+    }
     for name in gone {
         managed.remove(&name);
         shared.certificates.uninstall(&name);
