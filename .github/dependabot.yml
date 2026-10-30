@@ -16,6 +16,9 @@ updates:
       # Held at the 1.53 LTS line until Pingora works with tokio 1.54 (see Cargo.toml)
       - dependency-name: "tokio"
         versions: [">=1.54"]
+      # The version Pingora uses, so that one copy is built (see Cargo.toml); moves with it
+      - dependency-name: "x509-parser"
+        versions: [">=0.17"]
     commit-message:
       prefix: "chore(deps)"
 
