@@ -60,12 +60,14 @@ fn schema_file_is_up_to_date() {
     );
 }
 
-/// The example configuration is valid and produces no warnings.
+/// The example configurations are valid and produce no warnings.
 #[test]
-fn example_config_is_valid() {
-    let run = check(&repo_file("wormway.example.toml"));
-    assert_eq!(run.code, Some(0), "{}", run.stderr);
-    assert_eq!(run.stderr, "");
+fn example_configs_are_valid() {
+    for file in ["wormway.example.toml", "examples/web-server/wormway.toml"] {
+        let run = check(&repo_file(file));
+        assert_eq!(run.code, Some(0), "{file}: {}", run.stderr);
+        assert_eq!(run.stderr, "", "{file}");
+    }
 }
 
 /// A parse error is reported as `file:line:column`.

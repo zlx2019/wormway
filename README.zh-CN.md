@@ -27,6 +27,7 @@
 | `apps/wormway/` | `wormway` 二进制：`wormway run`、`wormway check`（校验配置文件）、`wormway schema`，以及 `wormway config export` 和 `wormway config apply`（通过 Admin API 导出、应用运行中 Wormway 的动态配置）。目前还没有内置任何协议，所以 `wormway run` 只接受不含监听器的配置。 |
 | `ui/` | 面板（React 与 TypeScript）。Wormway 在 Admin API 地址的 `/ui/` 下提供面板，默认是 `http://127.0.0.1:9872/ui/`，登录时输入 Admin API 的 token。 |
 | `benches/` | 性能测量的方法，以及开放负载压测和记录测试环境的脚本。 |
+| `examples/` | 可以直接上手的配置，每个一个目录：`web-server` 像刚装好的 Nginx 一样，提供欢迎页和 404 页。 |
 | `wormway.example.toml` | 示例配置。 |
 | `wormway.schema.json` | 配置文件的 JSON Schema，由 `wormway schema` 生成。编辑器用它补全和校验，例如 VS Code 装上 Even Better TOML 后，示例开头的 `#:schema` 一行即可生效。 |
 

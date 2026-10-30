@@ -1,0 +1,74 @@
+#:schema ../../wormway.schema.json
+# A web server that answers like a fresh Nginx: a welcome page at / and a 404 page for everything
+# else. Both pages are fixed responses of routes, so no files are needed.
+#
+#   sudo wormway run -c examples/web-server/wormway.toml   # port 80 needs root
+#   curl http://127.0.0.1/
+#
+# The settings live in this file: edit it and send SIGHUP to apply the changes.
+
+version = 1
+
+[config]
+source = "file"
+
+[log]
+time_format = "%Y-%m-%d %H:%M:%S%.3f"
+time_zone = "local"
+
+# One line per request in the format of Nginx, on standard output.
+[log.access]
+format = "combined"
+
+# Web server
+[listeners.web]
+listen = ["127.0.0.1:80"]   # ["0.0.0.0:80"] to serve every address on the usual port
+protocol = "http"
+
+# The welcome page, at / and at /index.html as Nginx serves it.
+[routes.welcome]
+match = { paths = [{ exact = "/" }, { exact = "/index.html" }] }
+response_headers = { set = { "Content-Type" = "text/html; charset=utf-8" } }
+
+[routes.welcome.respond]
+status = 200
+body = """
+<!DOCTYPE html>
+<html>
+<head>
+<title>Welcome to Wormway!</title>
+<style>
+html { color-scheme: light dark; }
+body { width: 35em; margin: 0 auto;
+font-family: Tahoma, Verdana, Arial, sans-serif; }
+</style>
+</head>
+<body>
+<h1>Welcome to Wormway!</h1>
+<p>If you see this page, the Wormway web server is installed and working.
+Further configuration is required.</p>
+
+<p>For documentation and support please refer to
+<a href="https://github.com/zlx2019/wormway">github.com/zlx2019/wormway</a>.</p>
+
+<p><em>Thank you for using Wormway.</em></p>
+</body>
+</html>
+"""
+
+# Every other request. A route without conditions matches any host and path, and comes after
+# every route with a condition, so it only gets the requests that no other route takes.
+[routes.not-found]
+response_headers = { set = { "Content-Type" = "text/html; charset=utf-8" } }
+
+[routes.not-found.respond]
+status = 404
+body = """
+<html>
+<head><title>404 Not Found</title></head>
+<body>
+<center><h1>404 Not Found</h1></center>
+<hr><center>wormway</center>
+</body>
+</html>
+"""
