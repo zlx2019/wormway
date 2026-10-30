@@ -157,6 +157,52 @@ impl Default for StorageSettings {
     }
 }
 
+/// ACME, which gets and renews the certificates that set `acme`, from Let's Encrypt or another
+/// certificate authority. Using it agrees to the terms of service of the authority.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(default, deny_unknown_fields)]
+pub struct AcmeSettings {
+    /// The directory of the certificate authority: `letsencrypt`, `letsencrypt-staging`, or
+    /// the HTTPS URL of the directory of another one.
+    pub directory: String,
+    /// An address the certificate authority may write to about the account.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    /// PEM file with the certificate authorities that the HTTPS certificate of the directory
+    /// is checked against, for private ACME servers; those of the system otherwise. Relative to
+    /// the configuration file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ca: Option<PathBuf>,
+}
+
+impl AcmeSettings {
+    /// The directory of Let's Encrypt.
+    pub const LETSENCRYPT: &str = "https://acme-v02.api.letsencrypt.org/directory";
+    /// The directory of the staging environment of Let's Encrypt, for tests.
+    pub const LETSENCRYPT_STAGING: &str = "https://acme-staging-v02.api.letsencrypt.org/directory";
+
+    /// Returns the URL of the directory.
+    pub fn directory_url(&self) -> &str {
+        match self.directory.as_str() {
+            "letsencrypt" => Self::LETSENCRYPT,
+            "letsencrypt-staging" => Self::LETSENCRYPT_STAGING,
+            url => url,
+        }
+    }
+}
+
+impl Default for AcmeSettings {
+    /// Let's Encrypt, without an email address.
+    fn default() -> Self {
+        Self {
+            directory: "letsencrypt".to_owned(),
+            email: None,
+            ca: None,
+        }
+    }
+}
+
 /// Where the dynamic settings come from.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]

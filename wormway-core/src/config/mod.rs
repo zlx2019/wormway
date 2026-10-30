@@ -1,9 +1,9 @@
 //! The configuration model: the types behind `wormway.toml`, parsing and validation.
 //!
-//! Static settings (`server`, `log`, `admin`, `storage` and `config`) are read once at startup.
-//! Dynamic settings (`listeners`, `routes`, `upstreams`, `certificates` and the entity tables
-//! added later) come from the database or from this file, as chosen by `config.source`, and can
-//! change while running.
+//! Static settings (`server`, `log`, `admin`, `storage`, `config` and `acme`) are read once at
+//! startup. Dynamic settings (`listeners`, `routes`, `upstreams`, `certificates` and the entity
+//! tables added later) come from the database or from this file, as chosen by `config.source`, and
+//! can change while running.
 //!
 //! [`Config::from_toml`] loads a configuration in two stages. Parsing checks the syntax and the
 //! structure and stops at the first error, which carries a line and column. Validation checks
@@ -27,7 +27,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 pub use action::{Action, HeaderRules, Redirect, RedirectPart, Respond, Rewrite};
-pub use certificate::Certificate;
+pub use certificate::{AcmeCertificate, AcmeChallenge, Certificate, DnsProvider, Secret};
 pub use duration::{Duration, ParseDurationError};
 pub use error::{ConfigError, Issue, ParseError, Position};
 pub use http::{
@@ -40,8 +40,8 @@ pub use route::{
     RouteMatch,
 };
 pub use settings::{
-    AccessLogFormat, AccessLogSettings, AdminSettings, ConfigSettings, ConfigSource, LogFormat,
-    LogSettings, ServerSettings, StorageSettings, TimeZone,
+    AccessLogFormat, AccessLogSettings, AcmeSettings, AdminSettings, ConfigSettings, ConfigSource,
+    LogFormat, LogSettings, ServerSettings, StorageSettings, TimeZone,
 };
 pub use time_format::{InvalidTimeFormat, TimeFormat};
 pub use upstream::{
@@ -72,6 +72,9 @@ pub struct Config {
     /// Where the dynamic settings come from. Static: a restart applies changes.
     #[serde(default)]
     pub config: ConfigSettings,
+    /// How certificates are got through ACME. Static: a restart applies changes.
+    #[serde(default)]
+    pub acme: AcmeSettings,
     /// Listeners by name. Dynamic: read from this file only when `config.source` is `"file"`.
     #[serde(default)]
     pub listeners: BTreeMap<Name, Listener>,
@@ -554,6 +557,119 @@ mod tests {
         )
         .unwrap();
         assert_eq!(dynamic.listeners.len(), 1);
+    }
+
+    /// Returns the problems of a file configuration with `text` added, as `path: message`.
+    fn problems(text: &str) -> Vec<String> {
+        let text = format!("version = 1\n[config]\nsource = \"file\"\n{text}");
+        match Config::from_toml(&text) {
+            Err(ConfigError::Invalid(issues)) => issues.iter().map(Issue::to_string).collect(),
+            other => panic!("expected validation issues, got {other:?}"),
+        }
+    }
+
+    /// Certificates come from files or through ACME, whose certificate authority `[acme]`
+    /// names; a DNS provider holds a reference to its token, not the token.
+    #[test]
+    fn reads_acme_settings() {
+        let plain = Config::from_toml("version = 1").unwrap();
+        assert_eq!(plain.acme.directory_url(), AcmeSettings::LETSENCRYPT);
+        let config = Config::from_toml(
+            r#"
+            version = 1
+            [acme]
+            directory = "letsencrypt-staging"
+            email = "ops@example.com"
+            ca = "certs/ca.pem"
+            [config]
+            source = "file"
+            [certificates.site]
+            acme = { domains = ["Example.com", "www.example.com"] }
+            [certificates.wild]
+            acme = { domains = ["*.example.com"], challenge = "dns-01", dns = { provider = "cloudflare", api_token = { env = "CF_API_TOKEN" } } }
+            [certificates.files]
+            cert = "a.crt"
+            key = "a.key"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.acme.directory_url(),
+            AcmeSettings::LETSENCRYPT_STAGING
+        );
+        let site = config.certificates["site"].acme.as_ref().unwrap();
+        assert_eq!(site.domains[0].as_str(), "example.com");
+        assert_eq!(site.challenge, AcmeChallenge::Http01);
+        let wild = config.certificates["wild"].acme.as_ref().unwrap();
+        let token = Secret::Env("CF_API_TOKEN".to_owned());
+        assert_eq!(wild.dns, Some(DnsProvider::Cloudflare { api_token: token }));
+        let text = toml::to_string(&config).unwrap();
+        assert_eq!(Config::from_toml(&text).unwrap(), config);
+
+        let custom =
+            Config::from_toml("version = 1\n[acme]\ndirectory = \"https://ca.internal/dir\"\n")
+                .unwrap();
+        assert_eq!(custom.acme.directory_url(), "https://ca.internal/dir");
+        for text in [
+            "[certificates.a]\nacme = { domains = [\"a.com\"], dns = { provider = \"route53\" } }\n",
+            "[certificates.a]\nacme = { domains = [\"a.com\"], challenge = \"dns-01\", dns = { provider = \"cloudflare\", api_token = { vault = \"x\" } } }\n",
+            "[certificates.a]\nacme = { domains = [\"a.com\"], challenge = \"dns-01\", dns = { provider = \"cloudflare\", api_token = { env = \"X\" }, zone = \"a.com\" } }\n",
+            "[certificates.a]\nacme = { domains = [\"a.com\"], challenge = \"tls-alpn-01\" }\n",
+        ] {
+            parse_error(&format!("version = 1\n{text}"));
+        }
+    }
+
+    /// A certificate needs either both files or ACME, and its ACME settings must fit together.
+    #[test]
+    fn checks_acme_settings() {
+        assert_eq!(
+            problems("[certificates.a]\ncert = \"a.crt\"\n"),
+            ["certificates.a: set cert and key, or acme"]
+        );
+        assert_eq!(
+            problems(
+                "[certificates.a]\ncert = \"a.crt\"\nkey = \"a.key\"\nacme = { domains = [\"a.com\"] }\n"
+            ),
+            ["certificates.a: set either cert and key, or acme"]
+        );
+        assert_eq!(
+            problems("[certificates.a]\nacme = { domains = [] }\n"),
+            ["certificates.a.acme.domains: must list at least one host name"]
+        );
+        let names = r#"["localhost", "10.0.0.1", "*.a.com", "a.com", "A.com"]"#;
+        let host = "must be a host name with a dot, such as example.com, not an IP address";
+        assert_eq!(
+            problems(&format!(
+                "[certificates.a]\nacme = {{ domains = {names} }}\n"
+            )),
+            [
+                format!("certificates.a.acme.domains[0]: {host}"),
+                format!("certificates.a.acme.domains[1]: {host}"),
+                "certificates.a.acme.domains[2]: wildcard names need challenge = \"dns-01\""
+                    .to_owned(),
+                "certificates.a.acme.domains[4]: listed twice".to_owned(),
+            ]
+        );
+        assert_eq!(
+            problems(
+                "[certificates.a]\nacme = { domains = [\"a.com\"], challenge = \"dns-01\" }\n"
+            ),
+            ["certificates.a.acme.dns: needed by challenge = \"dns-01\""]
+        );
+        assert_eq!(
+            problems(
+                "[certificates.a]\nacme = { domains = [\"a.com\"], dns = { provider = \"cloudflare\", api_token = { file = \"token\" } } }\n"
+            ),
+            ["certificates.a.acme.dns: only for challenge = \"dns-01\""]
+        );
+        assert_eq!(
+            problems("[acme]\ndirectory = \"http://ca.internal/dir\"\nemail = \"nobody\"\n"),
+            [
+                "acme.directory: must be \"letsencrypt\", \"letsencrypt-staging\" or an https:// URL",
+                "acme.email: must be an email address",
+            ]
+        );
     }
 
     /// Validation problems come back together, after parsing succeeds.

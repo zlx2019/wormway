@@ -16,6 +16,7 @@ use pingora::upstreams::peer::HttpPeer;
 use pingora::{Error, ErrorSource, ErrorType, HTTPStatus, RetryType};
 use wormway_core::config::{HashKey, Name, Rewrite};
 use wormway_core::routing::{self, Request, RequestHeaders};
+use wormway_tls::Challenges;
 
 use crate::access_log::{AccessLog, Record};
 use crate::compress;
@@ -25,6 +26,9 @@ use crate::route::{CompiledRoute, FixedResponse, Handler, RedirectTarget};
 use crate::snapshot::GatewaySnapshot;
 use crate::upstream::{CompiledUpstream, Inflight};
 use crate::{stats, telemetry};
+
+/// Where HTTP-01 challenges of ACME ask for the answer to a token.
+const CHALLENGE_PATH: &str = "/.well-known/acme-challenge/";
 
 /// Serves the requests of one listener.
 pub(crate) struct Proxy {
@@ -39,6 +43,8 @@ pub(crate) struct Proxy {
     tls: bool,
     /// Where the line of each request goes, if the access log is on.
     access_log: Option<AccessLog>,
+    /// The answers to the HTTP-01 challenges of ACME in progress.
+    challenges: Challenges,
 }
 
 /// State of one request.
@@ -67,17 +73,21 @@ pub(crate) struct RequestContext {
     answered: bool,
     /// Whether the metrics counted the current attempt already: one that failed to connect.
     counted: bool,
+    /// The answer to the HTTP-01 challenge the request asks for, if it asks for one in
+    /// progress.
+    challenge: Option<String>,
 }
 
 impl Proxy {
     /// Creates the application of `listener`, which has TLS if `tls`, writing a line for every
-    /// request to `access_log` if set.
+    /// request to `access_log` if set, and answering the HTTP-01 challenges of `challenges`.
     pub(crate) fn new(
         listener: Name,
         snapshot: Arc<ArcSwap<GatewaySnapshot>>,
         keepalive: Option<u64>,
         tls: bool,
         access_log: Option<AccessLog>,
+        challenges: Challenges,
     ) -> Self {
         Self {
             listener,
@@ -85,6 +95,7 @@ impl Proxy {
             keepalive,
             tls,
             access_log,
+            challenges,
         }
     }
 
@@ -124,12 +135,14 @@ impl ProxyHttp for Proxy {
             inflight: None,
             answered: false,
             counted: false,
+            challenge: None,
         }
     }
 
-    /// Applies the keep-alive timeout of the listener and finds the route of the request. The
-    /// route decides on compression, which has to be on before the compression module reads the
-    /// request headers, right after this.
+    /// Applies the keep-alive timeout of the listener and finds the route of the request, unless
+    /// it asks for the answer to an HTTP-01 challenge in progress, which comes before every
+    /// route. The route decides on compression, which has to be on before the compression
+    /// module reads the request headers, right after this.
     async fn early_request_filter(
         &self,
         session: &mut Session,
@@ -140,6 +153,15 @@ impl ProxyHttp for Proxy {
         if session.get_keepalive().is_some() {
             session.set_keepalive(self.keepalive);
         }
+        let request = session.req_header();
+        if request.method == Method::GET
+            && let Some(token) = request.uri.path().strip_prefix(CHALLENGE_PATH)
+        {
+            ctx.challenge = self.challenges.answer(token);
+            if ctx.challenge.is_some() {
+                return Ok(());
+            }
+        }
         ctx.route = self.find_route(session.req_header(), &ctx.snapshot);
         if ctx.route.as_ref().is_some_and(|route| route.compress) {
             compress::enable(session);
@@ -147,13 +169,17 @@ impl ProxyHttp for Proxy {
         Ok(())
     }
 
-    /// Answers the requests that do not go to an upstream: 404 without a route, and the
-    /// redirects and fixed responses of routes.
+    /// Answers the requests that do not go to an upstream: HTTP-01 challenges, 404 without a
+    /// route, and the redirects and fixed responses of routes.
     async fn request_filter(
         &self,
         session: &mut Session,
         ctx: &mut RequestContext,
     ) -> pingora::Result<bool> {
+        if let Some(answer) = ctx.challenge.take() {
+            answer_challenge(session, answer).await?;
+            return Ok(true);
+        }
         let Some(route) = ctx.route.clone() else {
             session.respond_error(404).await?;
             return Ok(true);
@@ -632,6 +658,19 @@ fn count_traffic(ctx: &RequestContext, status: u16, duration: Duration) {
             upstream.stats.record(second, error, ctx.upstream_duration);
         }
     }
+}
+
+/// Answers an HTTP-01 challenge with the key authorization of its token, as plain text.
+async fn answer_challenge(session: &mut Session, answer: String) -> pingora::Result<()> {
+    let mut response = ResponseHeader::build(200, Some(2))?;
+    response.insert_header("Content-Length", answer.len().to_string())?;
+    response.insert_header("Content-Type", "text/plain")?;
+    session
+        .write_response_header(Box::new(response), false)
+        .await?;
+    session
+        .write_response_body(Some(answer.into_bytes().into()), true)
+        .await
 }
 
 /// Returns the result of an attempt at a target that ended with `error`, if any, for the

@@ -12,13 +12,17 @@ use tokio::runtime::{Builder, Handle, Runtime};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
+use wormway_acme::Acme;
 use wormway_control::{Admin, AdminToken, Metrics, Store};
-use wormway_core::config::{AdminSettings, Config, ConfigError, ConfigSource, DynamicConfig};
+use wormway_core::config::{
+    AcmeSettings, AdminSettings, Config, ConfigError, ConfigSource, DynamicConfig,
+};
 use wormway_core::time::LogTime;
 use wormway_gateway::{AccessLog, Gateway};
 use wormway_runtime::{ApplyError, Server, Services, Snapshot};
 use wormway_tls::Certificates;
 
+use crate::acme::AcmeStore;
 use crate::signals::{Signal, Signals};
 use crate::{ADMIN_TOKEN_ENV, load, logging};
 
@@ -112,20 +116,29 @@ fn data_plane(threads: usize) -> std::io::Result<Runtime> {
     builder.build()
 }
 
-/// Service factories and engines of the protocols built into this binary: the certificates and
-/// the HTTP gateway, which writes to `access_log` if set. `threads` is the number of data-plane
-/// workers; relative certificate paths are resolved against `config_dir`.
-fn services(threads: usize, config_dir: &Path, access_log: Option<AccessLog>) -> Services {
+/// Service factories and engines of the protocols built into this binary: the certificates,
+/// ACME as `acme` says, which keeps its accounts and certificates in `store`, and the HTTP
+/// gateway, which writes to `access_log` if set. `threads` is the number of data-plane workers;
+/// relative paths are resolved against `config_dir`. Returns ACME as well, to run it.
+fn services(
+    threads: usize,
+    config_dir: &Path,
+    access_log: Option<AccessLog>,
+    acme: &AcmeSettings,
+    store: Store,
+) -> (Services, Acme) {
     let mut services = Services::new();
     let certificates = Certificates::new(config_dir);
     certificates.register(&mut services);
+    let acme = Acme::new(acme, certificates.clone(), AcmeStore(store), config_dir);
+    acme.register(&mut services);
     let gateway = Gateway::new(threads, certificates);
     match access_log {
         Some(access_log) => gateway.with_access_log(access_log),
         None => gateway,
     }
     .register(&mut services);
-    services
+    (services, acme)
 }
 
 /// Serves until a shutdown signal. A second shutdown signal closes open connections at once.
@@ -149,9 +162,17 @@ async fn serve(setup: Setup, data_plane: Handle) -> anyhow::Result<ExitCode> {
         config.set_dynamic(saved_dynamic(&store).await?);
     }
     let workers = data_plane.metrics().num_workers();
-    let services = services(workers, load::config_dir(&path), access_log.clone());
+    let config_dir = load::config_dir(&path);
+    let (services, acme) = services(
+        workers,
+        config_dir,
+        access_log.clone(),
+        &config.acme,
+        store.clone(),
+    );
     let server = Arc::new(Server::start(data_plane, services, config).await?);
     tokio::spawn(metrics.clone().keep_up());
+    tokio::spawn(acme.run());
     let admin = Admin::new(server.clone(), store.clone(), token, metrics).await?;
     let listener = TcpListener::bind(admin_addr)
         .await

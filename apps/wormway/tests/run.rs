@@ -592,6 +592,49 @@ key = "site.key"
     assert_eq!(wormway.exit_code(), Some(0));
 }
 
+/// A certificate that the configuration gets through ACME is ordered as Wormway starts. When
+/// the certificate authority cannot be reached, the attempt fails with the reason and waits an
+/// hour before the next one, also across reloads; without a listener on port 80, HTTP-01 is
+/// pointed out.
+#[test]
+fn orders_acme_certificates() {
+    let directory = format!("https://{}/directory", closed_port());
+    let config = format!(
+        "{EMPTY}[acme]\ndirectory = \"{directory}\"\n[certificates.site]\nacme = {{ domains = [\"site.test\"] }}\n"
+    );
+    let path = temp_config("run-acme", &config);
+    let mut wormway = Wormway::start(&path);
+    // ACME runs next to the rest of the start, so its lines come in any order with the others.
+    let failed = wormway.wait_for("cannot get the certificate through ACME");
+    assert!(failed.contains("trying again in 1h"), "{failed}");
+    let reason = format!("cannot create an ACME account at {directory}: ");
+    assert!(failed.contains(&reason), "{failed}");
+    assert!(failed.contains("Connection refused"), "{failed}");
+    let earlier = wormway.drain();
+    for line in [
+        "no HTTP listener listens on port 80",
+        "ordering a certificate through ACME certificate=site",
+    ] {
+        assert!(
+            earlier.iter().any(|seen| seen.contains(line)),
+            "{line} not in {earlier:#?}"
+        );
+    }
+
+    // A reload keeps the wait after the failure: nothing is ordered again at once.
+    wormway.signal("HUP");
+    wormway.wait_for("configuration reloaded");
+    std::thread::sleep(Duration::from_millis(500));
+    let lines = wormway.drain();
+    let orders = lines
+        .iter()
+        .filter(|line| line.contains("ordering a certificate through ACME"))
+        .count();
+    assert_eq!(orders, 1, "{lines:#?}");
+    wormway.signal("TERM");
+    assert_eq!(wormway.exit_code(), Some(0));
+}
+
 /// Returns the lines of the file at `path`, none if it does not exist.
 fn file_lines(path: &Path) -> Vec<String> {
     std::fs::read_to_string(path)

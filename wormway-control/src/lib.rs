@@ -11,5 +11,5 @@ mod ui;
 
 pub use api::{Admin, serve};
 pub use prometheus::{Metrics, MetricsError};
-pub use store::{ChangeSource, SavedVersion, Store, StoreError};
+pub use store::{AcmeCertificateRecord, ChangeSource, SavedVersion, Store, StoreError};
 pub use token::{AdminToken, TokenError};

@@ -9,7 +9,7 @@ use rustls::sign::CertifiedKey;
 use rustls::{Error as TlsError, InconsistentKeys};
 use rustls_pki_types::pem::{self, PemObject};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
-use wormway_core::config::{Certificate, Issue, Name};
+use wormway_core::config::{Issue, Name};
 use x509_parser::extensions::GeneralName;
 
 /// A certificate ready for handshakes, with its details.
@@ -73,24 +73,48 @@ impl CertificateInfo {
     }
 }
 
-/// Reads certificate `name` with the files of `certificate`, relative paths resolved against
+/// Reads certificate `name` from the files `cert` and `key`, relative paths resolved against
 /// `base`, and checks that the key belongs to the certificate. The problem comes back with the
 /// path of the setting it concerns.
 pub(crate) fn load(
     provider: &CryptoProvider,
     base: &Path,
     name: &Name,
-    certificate: &Certificate,
+    cert: &Path,
+    key: &Path,
 ) -> Result<Loaded, Issue> {
     let at = |field: &str| format!("certificates.{name}.{field}");
-    let chain = read_chain(&base.join(&certificate.cert)).map_err(|e| Issue::new(at("cert"), e))?;
-    let key = read_key(&base.join(&certificate.key)).map_err(|e| Issue::new(at("key"), e))?;
+    let chain = read_chain(&base.join(cert)).map_err(|e| Issue::new(at("cert"), e))?;
+    let key = read_key(&base.join(key)).map_err(|e| Issue::new(at("key"), e))?;
     let info = chain
         .first()
         .ok_or_else(|| "no certificate found".to_owned())
         .and_then(CertificateInfo::parse)
         .map_err(|e| Issue::new(at("cert"), e))?;
     let key = certify(provider, chain, key, &format!("certificates.{name}"))?;
+    Ok(Loaded {
+        key: Arc::new(key),
+        info,
+    })
+}
+
+/// Reads a certificate chain and its private key from PEM text, as ACME issues them, and checks
+/// that the key belongs to the leaf certificate.
+pub(crate) fn parse_issued(
+    provider: &CryptoProvider,
+    chain: &str,
+    key: &str,
+) -> Result<Loaded, String> {
+    let chain = CertificateDer::pem_slice_iter(chain.as_bytes())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("cannot parse the certificate chain: {error}"))?;
+    let info = chain
+        .first()
+        .ok_or_else(|| "no certificate found".to_owned())
+        .and_then(CertificateInfo::parse)?;
+    let key = PrivateKeyDer::from_pem_slice(key.as_bytes())
+        .map_err(|error| format!("cannot parse the private key: {error}"))?;
+    let key = certify(provider, chain, key, "certificate").map_err(|issue| issue.to_string())?;
     Ok(Loaded {
         key: Arc::new(key),
         info,
@@ -211,6 +235,7 @@ fn read(path: &Path) -> Result<Vec<u8>, String> {
 pub(crate) mod tests {
     use rcgen::{CertificateParams, KeyPair};
     use tempfile::TempDir;
+    use wormway_core::config::Certificate;
 
     use super::*;
     use crate::provider;
@@ -227,8 +252,9 @@ pub(crate) mod tests {
         std::fs::write(dir.join(format!("{file}.crt")), cert.pem()).unwrap();
         std::fs::write(dir.join(format!("{file}.key")), key.serialize_pem()).unwrap();
         Certificate {
-            cert: format!("{file}.crt").into(),
-            key: format!("{file}.key").into(),
+            cert: Some(format!("{file}.crt").into()),
+            key: Some(format!("{file}.key").into()),
+            acme: None,
         }
     }
 
@@ -238,7 +264,8 @@ pub(crate) mod tests {
             &provider(),
             dir.path(),
             &"site".parse().unwrap(),
-            certificate,
+            certificate.cert.as_deref().unwrap(),
+            certificate.key.as_deref().unwrap(),
         )
     }
 
@@ -254,8 +281,9 @@ pub(crate) mod tests {
 
         // Absolute paths are used as they are.
         let absolute = Certificate {
-            cert: dir.path().join("site.crt"),
-            key: dir.path().join("site.key"),
+            cert: Some(dir.path().join("site.crt")),
+            key: Some(dir.path().join("site.key")),
+            acme: None,
         };
         let elsewhere = TempDir::new().unwrap();
         assert!(load_from(&elsewhere, &absolute).is_ok());
@@ -271,7 +299,7 @@ pub(crate) mod tests {
         let issue = |certificate: Certificate| load_from(&dir, &certificate).unwrap_err();
 
         let missing = issue(Certificate {
-            cert: "missing.crt".into(),
+            cert: Some("missing.crt".into()),
             ..site.clone()
         });
         assert_eq!(missing.path, "certificates.site.cert");

@@ -1,5 +1,6 @@
 //! The `wormway` program: gateway, proxy protocols, reverse tunnels and dashboard in one binary.
 
+mod acme;
 mod admin;
 mod config;
 mod load;

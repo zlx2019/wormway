@@ -1,4 +1,5 @@
-//! The SQLite database: versions of the dynamic settings and small values of this instance.
+//! The SQLite database: versions of the dynamic settings, small values of this instance, and
+//! the accounts and certificates of ACME. It holds private keys, so only its owner may read it.
 
 use std::error::Error;
 use std::path::Path;
@@ -50,6 +51,19 @@ pub struct SavedVersion {
     pub comment: String,
 }
 
+/// A certificate issued through ACME, as saved: what it was ordered for, and its chain and key.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AcmeCertificateRecord {
+    /// The ACME directory that issued it.
+    pub directory: String,
+    /// The host names it was ordered for, sorted.
+    pub domains: Vec<String>,
+    /// The certificate chain, leaf first, as PEM.
+    pub chain: String,
+    /// The private key, as PEM.
+    pub key: String,
+}
+
 /// A saved version with its content, as read from the table.
 #[derive(sqlx::FromRow)]
 struct VersionRow {
@@ -62,7 +76,12 @@ struct VersionRow {
 
 impl Store {
     /// Opens the database at `path`, creating it if needed, and brings its schema up to date.
+    /// The file, and those SQLite keeps next to it, become readable by their owner only.
     pub async fn open(path: &Path) -> Result<Self, StoreError> {
+        #[cfg(unix)]
+        restrict(path).map_err(|e| {
+            StoreError::new(format!("cannot restrict access to {}", path.display()), e)
+        })?;
         let options = SqliteConnectOptions::new()
             .filename(path)
             .create_if_missing(true)
@@ -169,6 +188,116 @@ impl Store {
         .await
         .map_err(|e| StoreError::new("cannot list the configuration versions", e))
     }
+
+    /// Returns the credentials of the ACME account at `directory`, if one was saved.
+    pub async fn acme_account(&self, directory: &str) -> Result<Option<String>, StoreError> {
+        sqlx::query_scalar("SELECT credentials FROM acme_accounts WHERE directory = ?")
+            .bind(directory)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| StoreError::new("cannot read the ACME account", e))
+    }
+
+    /// Saves the credentials of the ACME account at `directory`, in place of any before.
+    pub async fn save_acme_account(
+        &self,
+        directory: &str,
+        credentials: &str,
+    ) -> Result<(), StoreError> {
+        sqlx::query("INSERT OR REPLACE INTO acme_accounts (directory, credentials) VALUES (?, ?)")
+            .bind(directory)
+            .bind(credentials)
+            .execute(&self.pool)
+            .await
+            .map(|_| ())
+            .map_err(|e| StoreError::new("cannot save the ACME account", e))
+    }
+
+    /// Returns the certificate issued through ACME for certificate `name`, if one was saved.
+    pub async fn acme_certificate(
+        &self,
+        name: &str,
+    ) -> Result<Option<AcmeCertificateRecord>, StoreError> {
+        let row: Option<(String, String, String, String)> = sqlx::query_as(
+            "SELECT directory, domains, chain, key FROM acme_certificates WHERE name = ?",
+        )
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| StoreError::new("cannot read the ACME certificate", e))?;
+        let Some((directory, domains, chain, key)) = row else {
+            return Ok(None);
+        };
+        let domains = serde_json::from_str(&domains)
+            .map_err(|e| StoreError::new(format!("ACME certificate {name} is unreadable"), e))?;
+        Ok(Some(AcmeCertificateRecord {
+            directory,
+            domains,
+            chain,
+            key,
+        }))
+    }
+
+    /// Saves `certificate` as the one issued through ACME for certificate `name`, in place of
+    /// any before.
+    pub async fn save_acme_certificate(
+        &self,
+        name: &str,
+        certificate: &AcmeCertificateRecord,
+    ) -> Result<(), StoreError> {
+        let domains = serde_json::to_string(&certificate.domains)
+            .map_err(|e| StoreError::new("cannot encode the host names", e))?;
+        sqlx::query(
+            "INSERT OR REPLACE INTO acme_certificates (name, directory, domains, chain, key) \
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(name)
+        .bind(&certificate.directory)
+        .bind(domains)
+        .bind(&certificate.chain)
+        .bind(&certificate.key)
+        .execute(&self.pool)
+        .await
+        .map(|_| ())
+        .map_err(|e| StoreError::new("cannot save the ACME certificate", e))
+    }
+
+    /// Removes the certificate issued through ACME for certificate `name`, if there is one.
+    pub async fn remove_acme_certificate(&self, name: &str) -> Result<(), StoreError> {
+        sqlx::query("DELETE FROM acme_certificates WHERE name = ?")
+            .bind(name)
+            .execute(&self.pool)
+            .await
+            .map(|_| ())
+            .map_err(|e| StoreError::new("cannot remove the ACME certificate", e))
+    }
+}
+
+/// Creates the database file at `path` if needed, and makes it and the files SQLite keeps
+/// next to it readable and writable by their owner only; files that SQLite creates later take
+/// the permissions of the database file.
+#[cfg(unix)]
+fn restrict(path: &Path) -> std::io::Result<()> {
+    use std::fs::{OpenOptions, Permissions};
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(path)?;
+    let companions = ["-wal", "-shm"].map(|suffix| {
+        let mut companion = path.as_os_str().to_owned();
+        companion.push(suffix);
+        std::path::PathBuf::from(companion)
+    });
+    for file in std::iter::once(path.to_owned()).chain(companions) {
+        match std::fs::set_permissions(&file, Permissions::from_mode(0o600)) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// Parses the settings stored with a version.
@@ -200,5 +329,81 @@ impl StoreError {
             action: action.into(),
             source: source.into(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A certificate as ACME would leave it.
+    fn record(domains: &[&str]) -> AcmeCertificateRecord {
+        AcmeCertificateRecord {
+            directory: "https://ca.test/dir".to_owned(),
+            domains: domains.iter().map(|domain| (*domain).to_owned()).collect(),
+            chain: "the certificate chain".to_owned(),
+            key: "the private key".to_owned(),
+        }
+    }
+
+    /// Accounts are kept by directory and certificates by name; saving again replaces them,
+    /// and a removed certificate is gone.
+    #[tokio::test]
+    async fn keeps_acme_accounts_and_certificates() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("wormway.db")).await.unwrap();
+        let directory = "https://ca.test/dir";
+        assert_eq!(store.acme_account(directory).await.unwrap(), None);
+        store
+            .save_acme_account(directory, "{\"a\":1}")
+            .await
+            .unwrap();
+        store
+            .save_acme_account(directory, "{\"a\":2}")
+            .await
+            .unwrap();
+        let account = store.acme_account(directory).await.unwrap();
+        assert_eq!(account.as_deref(), Some("{\"a\":2}"));
+        let other = store.acme_account("https://other.test/dir").await.unwrap();
+        assert_eq!(other, None);
+
+        assert_eq!(store.acme_certificate("site").await.unwrap(), None);
+        let first = record(&["a.test"]);
+        store.save_acme_certificate("site", &first).await.unwrap();
+        let next = record(&["a.test", "b.test"]);
+        store.save_acme_certificate("site", &next).await.unwrap();
+        assert_eq!(store.acme_certificate("site").await.unwrap(), Some(next));
+        store.remove_acme_certificate("site").await.unwrap();
+        assert_eq!(store.acme_certificate("site").await.unwrap(), None);
+        store.remove_acme_certificate("site").await.unwrap();
+    }
+
+    /// The database holds private keys: a new file is readable by its owner only, and an
+    /// existing one is restricted when it is opened, with the files SQLite keeps next to it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restricts_the_database_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mode = |file: &str| {
+            let metadata = std::fs::metadata(dir.path().join(file)).unwrap();
+            metadata.permissions().mode() & 0o777
+        };
+        let path = dir.path().join("wormway.db");
+        let store = Store::open(&path).await.unwrap();
+        store.instance_id().await.unwrap();
+        assert_eq!(mode("wormway.db"), 0o600);
+        assert_eq!(mode("wormway.db-wal"), 0o600);
+        store.close().await;
+
+        let open = std::fs::Permissions::from_mode(0o644);
+        std::fs::set_permissions(&path, open.clone()).unwrap();
+        std::fs::write(dir.path().join("wormway.db-shm"), b"").unwrap();
+        std::fs::set_permissions(dir.path().join("wormway.db-shm"), open).unwrap();
+        let store = Store::open(&path).await.unwrap();
+        assert_eq!(mode("wormway.db"), 0o600);
+        assert_eq!(mode("wormway.db-shm"), 0o600);
+        store.close().await;
     }
 }

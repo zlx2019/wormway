@@ -6,8 +6,8 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use super::http::is_token;
 use super::upstream::is_host_name;
 use super::{
-    Balance, Config, ConfigSource, Duration, HashKey, HeaderName, HeaderRules, HealthCheckKind,
-    Issue, Name, PathPattern, Redirect, Route, Target, Upstream, UpstreamProtocol,
+    AcmeChallenge, Balance, Config, ConfigSource, Duration, HashKey, HeaderName, HeaderRules,
+    HealthCheckKind, Issue, Name, PathPattern, Redirect, Route, Target, Upstream, UpstreamProtocol,
 };
 use crate::routing::normalize_path;
 
@@ -30,6 +30,8 @@ pub(super) fn errors(config: &Config) -> Vec<Issue> {
     check_address_conflicts(config, &mut issues);
     check_routes(config, &mut issues);
     check_upstreams(config, &mut issues);
+    check_acme(config, &mut issues);
+    check_certificates(config, &mut issues);
     issues
 }
 
@@ -54,6 +56,77 @@ pub(super) fn warnings(config: &Config) -> Vec<Issue> {
             )
         })
         .collect()
+}
+
+/// The ACME directory is one of Let's Encrypt or an HTTPS URL, and the email an address.
+fn check_acme(config: &Config, issues: &mut Vec<Issue>) {
+    let acme = &config.acme;
+    let known = ["letsencrypt", "letsencrypt-staging"].contains(&acme.directory.as_str());
+    if !known && !acme.directory.starts_with("https://") {
+        issues.push(Issue::new(
+            "acme.directory",
+            "must be \"letsencrypt\", \"letsencrypt-staging\" or an https:// URL",
+        ));
+    }
+    if let Some(email) = &acme.email
+        && (!email.contains('@') || email.contains(char::is_whitespace))
+    {
+        issues.push(Issue::new("acme.email", "must be an email address"));
+    }
+}
+
+/// Each certificate comes from files or through ACME, and its ACME settings fit together:
+/// host names that a certificate authority accepts, each once, wildcards and a DNS provider
+/// only with `dns-01`, which needs one.
+fn check_certificates(config: &Config, issues: &mut Vec<Issue>) {
+    for (name, certificate) in &config.certificates {
+        let at = |field: &str| format!("certificates.{name}{field}");
+        match (&certificate.acme, &certificate.cert, &certificate.key) {
+            (Some(_), None, None) | (None, Some(_), Some(_)) => {}
+            (Some(_), _, _) => issues.push(Issue::new(at(""), "set either cert and key, or acme")),
+            (None, _, _) => issues.push(Issue::new(at(""), "set cert and key, or acme")),
+        }
+        let Some(acme) = &certificate.acme else {
+            continue;
+        };
+        if acme.domains.is_empty() {
+            issues.push(Issue::new(
+                at(".acme.domains"),
+                "must list at least one host name",
+            ));
+        }
+        let mut seen = HashSet::new();
+        for (index, domain) in acme.domains.iter().enumerate() {
+            let at = at(&format!(".acme.domains[{index}]"));
+            let host = domain.wildcard_suffix().unwrap_or(domain.as_str());
+            if !is_host_name(host) || !host.contains('.') {
+                issues.push(Issue::new(
+                    &at,
+                    "must be a host name with a dot, such as example.com, not an IP address",
+                ));
+            }
+            if domain.wildcard_suffix().is_some() && acme.challenge != AcmeChallenge::Dns01 {
+                issues.push(Issue::new(
+                    &at,
+                    "wildcard names need challenge = \"dns-01\"",
+                ));
+            }
+            if !seen.insert(domain.as_str()) {
+                issues.push(Issue::new(&at, "listed twice"));
+            }
+        }
+        match (acme.challenge, &acme.dns) {
+            (AcmeChallenge::Dns01, None) => issues.push(Issue::new(
+                at(".acme.dns"),
+                "needed by challenge = \"dns-01\"",
+            )),
+            (AcmeChallenge::Http01, Some(_)) => issues.push(Issue::new(
+                at(".acme.dns"),
+                "only for challenge = \"dns-01\"",
+            )),
+            _ => {}
+        }
+    }
 }
 
 /// Each listener has an address, and its TLS settings name existing certificates.

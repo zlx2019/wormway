@@ -1,5 +1,6 @@
 //! Integration tests of what routes do besides forwarding: redirects, fixed responses, path
-//! rewrites, header changes, the headers that tell upstreams about clients, and compression.
+//! rewrites, header changes, the headers that tell upstreams about clients, and compression;
+//! and of the answers to the HTTP-01 challenges of ACME, which come before every route.
 
 mod common;
 
@@ -13,6 +14,7 @@ use axum::routing::get;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use wormway_runtime::Server;
+use wormway_tls::Certificates;
 
 use crate::common::{addr, serve, upstream};
 
@@ -447,4 +449,63 @@ async fn compresses_text_responses() {
     let (status, encoding, body) = get_h2c(web, "compressed", "/text", "gzip").await;
     assert_eq!((status, encoding.as_deref()), (200, Some("gzip")));
     assert!(body.starts_with(&[0x1f, 0x8b]), "not gzip");
+}
+
+/// The answer to an HTTP-01 challenge in progress comes before every route, for any host, even
+/// one that redirects to HTTPS; other tokens, other methods and challenges no longer in
+/// progress go to the routes as usual.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn answers_acme_challenges() {
+    let blue = upstream("blue").await;
+    let certificates = Certificates::new(".");
+    let text = format!(
+        r#"{WEB}
+        [routes.all]
+        upstream = "app"
+        [routes.to-https]
+        match = {{ hosts = ["secure.test"] }}
+        redirect = {{ to = "https://{{host}}{{uri}}", status = 301 }}
+        [upstreams.app]
+        targets = ["{blue}"]
+        "#
+    );
+    let server = common::start_with(&text, certificates.clone(), None).await;
+    let web = addr(&server, "web").await;
+    certificates
+        .challenges()
+        .insert("token-1", "token-1.thumbprint");
+    let challenge = format!("http://{web}/.well-known/acme-challenge/token-1");
+
+    let response = client()
+        .get(&challenge)
+        .header("Host", "secure.test")
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "text/plain");
+    assert_eq!(response.text().await.expect("body"), "token-1.thumbprint");
+
+    let other = format!("http://{web}/.well-known/acme-challenge/token-2");
+    let routed = client().get(&other).header("Host", "a.test").send().await;
+    assert_eq!(
+        routed.expect("send").text().await.expect("body"),
+        "blue a.test /.well-known/acme-challenge/token-2"
+    );
+    let posted = client()
+        .post(&challenge)
+        .header("Host", "a.test")
+        .send()
+        .await;
+    assert_eq!(
+        posted.expect("send").text().await.expect("body"),
+        "blue a.test /.well-known/acme-challenge/token-1"
+    );
+    certificates.challenges().remove("token-1");
+    let ended = client()
+        .get(&challenge)
+        .header("Host", "secure.test")
+        .send()
+        .await;
+    assert_eq!(ended.expect("send").status(), StatusCode::MOVED_PERMANENTLY);
 }

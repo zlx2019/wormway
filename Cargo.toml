@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["wormway-core", "wormway-runtime", "wormway-control", "wormway-gateway", "wormway-tls", "apps/*"]
+members = ["wormway-core", "wormway-runtime", "wormway-control", "wormway-gateway", "wormway-tls", "wormway-acme", "apps/*"]
 
 [workspace.package]
 version = "0.0.0"
@@ -14,6 +14,7 @@ readme = "README.md"
 publish = false
 
 [workspace.dependencies]
+wormway-acme = { path = "wormway-acme" }
 wormway-control = { path = "wormway-control" }
 wormway-core = { path = "wormway-core" }
 wormway-gateway = { path = "wormway-gateway" }
@@ -24,6 +25,7 @@ anyhow = "1.0.104"
 arc-swap = "1.9.3"
 async-trait = "0.1.92"
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "query", "tokio", "tracing"] }
+bytes = "1.12.1"
 # Times of the logs: strftime patterns and the local time zone. Pingora brings it in already.
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 clap = { version = "4.6.7", features = ["derive", "env"] }
@@ -33,6 +35,12 @@ getrandom = "0.4.3"
 h2 = "0.4.20"
 # The HTTP types of Pingora, for headers parsed once and reused by every request.
 http = "1.5.0"
+# The HTTP client of the DNS provider APIs, with bytes: instant-acme brings these in already.
+http-body-util = "0.1.5"
+hyper-rustls = { version = "0.27.7", default-features = false, features = ["aws-lc-rs", "http1", "rustls-platform-verifier", "tls12"] }
+hyper-util = { version = "0.1.21", features = ["client-legacy", "http1", "tokio"] }
+# ACME, with the key and CSR of each certificate (rcgen) and renewal information (time).
+instant-acme = { version = "0.8.5", features = ["rcgen", "time"] }
 metrics = "0.24.6"
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 # Pinned: every 0.x release breaks the API. Upgrades happen between milestones.

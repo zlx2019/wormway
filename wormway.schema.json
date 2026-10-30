@@ -40,6 +40,86 @@
       },
       "type": "object"
     },
+    "AcmeCertificate": {
+      "additionalProperties": false,
+      "description": "A certificate that Wormway gets through ACME.",
+      "properties": {
+        "challenge": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AcmeChallenge"
+            }
+          ],
+          "default": "http-01",
+          "description": "How the certificate authority checks that the host names are ours."
+        },
+        "dns": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/DnsProvider"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The DNS provider that publishes the records of `dns-01`."
+        },
+        "domains": {
+          "description": "Host names the certificate covers, such as `example.com`. `*.example.com` covers one\nlabel in front of `example.com` and needs `dns-01`.",
+          "items": {
+            "maxLength": 255,
+            "pattern": "^(\\*\\.)?[A-Za-z0-9_-]{1,63}(\\.[A-Za-z0-9_-]{1,63})*$",
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "domains"
+      ],
+      "type": "object"
+    },
+    "AcmeChallenge": {
+      "description": "How the certificate authority checks that the host names of a certificate are ours.",
+      "oneOf": [
+        {
+          "const": "http-01",
+          "description": "It fetches `http://<name>/.well-known/acme-challenge/<token>`, which every HTTP listener\nanswers, so one must be reachable on port 80 for the names.",
+          "type": "string"
+        },
+        {
+          "const": "dns-01",
+          "description": "It looks up a TXT record at `_acme-challenge.<name>`, which `dns` publishes. Wildcard\nnames need it.",
+          "type": "string"
+        }
+      ]
+    },
+    "AcmeSettings": {
+      "additionalProperties": false,
+      "description": "ACME, which gets and renews the certificates that set `acme`, from Let's Encrypt or another\ncertificate authority. Using it agrees to the terms of service of the authority.",
+      "properties": {
+        "ca": {
+          "description": "PEM file with the certificate authorities that the HTTPS certificate of the directory\nis checked against, for private ACME servers; those of the system otherwise. Relative to\nthe configuration file.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "directory": {
+          "default": "letsencrypt",
+          "description": "The directory of the certificate authority: `letsencrypt`, `letsencrypt-staging`, or\nthe HTTPS URL of the directory of another one.",
+          "type": "string"
+        },
+        "email": {
+          "description": "An address the certificate authority may write to about the account.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "AdminSettings": {
       "additionalProperties": false,
       "description": "The Admin API and the dashboard.",
@@ -84,21 +164,34 @@
     },
     "Certificate": {
       "additionalProperties": false,
-      "description": "A certificate chain and its private key, read from PEM files. Relative paths are resolved\nagainst the directory of the configuration file. The files are read again whenever the\nconfiguration is applied, so that replaced files take effect on reload.",
+      "description": "A TLS certificate: a chain and its private key read from PEM files, or one that Wormway gets\nand renews through ACME. Set `cert` and `key`, or `acme`.\n\nRelative paths are resolved against the directory of the configuration file. The files are\nread again whenever the configuration is applied, so that replaced files take effect on\nreload.",
       "properties": {
+        "acme": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AcmeCertificate"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Get the certificate from the certificate authority of `[acme]` and renew it, in place\nof `cert` and `key`."
+        },
         "cert": {
           "description": "PEM file with the certificate chain, leaf certificate first.",
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "key": {
           "description": "PEM file with the private key.",
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
-      "required": [
-        "cert",
-        "key"
-      ],
       "type": "object"
     },
     "ConfigSettings": {
@@ -129,6 +222,34 @@
           "const": "file",
           "description": "The configuration file. Edit it and send SIGHUP to reload; the dashboard is read-only.",
           "type": "string"
+        }
+      ]
+    },
+    "DnsProvider": {
+      "description": "A DNS provider whose API publishes the TXT records of `dns-01`.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Cloudflare.",
+          "properties": {
+            "api_token": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/Secret"
+                }
+              ],
+              "description": "An API token that may edit the DNS records of the zones of the names (Zone, DNS,\nEdit)."
+            },
+            "provider": {
+              "const": "cloudflare",
+              "type": "string"
+            }
+          },
+          "required": [
+            "provider",
+            "api_token"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -777,6 +898,37 @@
       },
       "type": "object"
     },
+    "Secret": {
+      "description": "A secret that the configuration refers to instead of holding it, read whenever the\nconfiguration is applied: `{ env = \"NAME\" }` takes an environment variable, `{ file =\n\"path\" }` the content of a file, relative to the configuration file. Whitespace around the\nvalue is dropped.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "The value of this environment variable.",
+          "properties": {
+            "env": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "env"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The content of this file.",
+          "properties": {
+            "file": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "file"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "ServerSettings": {
       "additionalProperties": false,
       "description": "Process settings.",
@@ -1071,6 +1223,17 @@
   },
   "description": "The configuration file, `wormway.toml`.",
   "properties": {
+    "acme": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/AcmeSettings"
+        }
+      ],
+      "default": {
+        "directory": "letsencrypt"
+      },
+      "description": "How certificates are got through ACME. Static: a restart applies changes."
+    },
     "admin": {
       "allOf": [
         {

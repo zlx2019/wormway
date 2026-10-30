@@ -4,15 +4,15 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use arc_swap::ArcSwap;
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
-use wormway_core::config::{Listener, Name, UnknownSni};
+use wormway_core::config::{ListenerTls, Name, UnknownSni};
 
 use crate::load::Loaded;
+use crate::publish::Published;
 
-/// The certificates of one configuration and the index of every TLS listener. It never changes:
-/// a new configuration builds a new snapshot.
+/// The certificates in effect and the index of every TLS listener. It never changes: a new
+/// configuration, or a certificate that ACME issued, builds a new snapshot.
 #[derive(Debug, Default)]
 pub(crate) struct TlsSnapshot {
     /// Certificates by name.
@@ -22,28 +22,34 @@ pub(crate) struct TlsSnapshot {
 }
 
 impl TlsSnapshot {
-    /// Indexes `certificates` for every TLS listener of `listeners`.
+    /// Indexes `certificates` for every TLS listener, whose TLS settings `listeners` holds by
+    /// name. Certificates that a listener names but that are missing, those that ACME has not
+    /// issued yet, are left out.
     pub(crate) fn new(
         certificates: BTreeMap<Name, Arc<Loaded>>,
-        listeners: &BTreeMap<Name, Listener>,
+        listeners: &BTreeMap<Name, ListenerTls>,
     ) -> Self {
         let listeners = listeners
             .iter()
-            .filter_map(|(name, listener)| {
-                let tls = listener.tls.as_ref()?;
-                // Validation made sure that every certificate a listener names exists.
+            .map(|(name, tls)| {
                 let own = tls
                     .certificates
                     .iter()
                     .filter_map(|certificate| certificates.get(certificate));
                 let index = SniIndex::new(own.map(Arc::as_ref), tls.unknown_sni());
-                Some((name.clone(), index))
+                (name.clone(), index)
             })
             .collect();
         Self {
             certificates,
             listeners,
         }
+    }
+
+    /// Returns the certificate that `listener` presents for host name `sni`, or to a client
+    /// that sends none.
+    pub(crate) fn find(&self, listener: &str, sni: Option<&str>) -> Option<Arc<CertifiedKey>> {
+        self.listeners.get(listener)?.find(sni)
     }
 }
 
@@ -98,24 +104,26 @@ pub(crate) struct ListenerResolver {
     /// The listener.
     listener: Name,
     /// The certificates in effect.
-    snapshot: Arc<ArcSwap<TlsSnapshot>>,
+    published: Arc<Published>,
 }
 
 impl ListenerResolver {
     /// Creates the resolver of `listener`.
-    pub(crate) fn new(listener: Name, snapshot: Arc<ArcSwap<TlsSnapshot>>) -> Self {
-        Self { listener, snapshot }
+    pub(crate) fn new(listener: Name, published: Arc<Published>) -> Self {
+        Self {
+            listener,
+            published,
+        }
     }
 }
 
 impl ResolvesServerCert for ListenerResolver {
     /// Returns the certificate for the host name of the handshake. `None` fails the handshake.
     fn resolve(&self, client_hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
-        self.snapshot
+        self.published
+            .snapshot
             .load()
-            .listeners
-            .get(&self.listener)?
-            .find(client_hello.server_name())
+            .find(self.listener.as_str(), client_hello.server_name())
     }
 }
 
@@ -127,6 +135,7 @@ mod tests {
     use super::*;
     use crate::load::{load, tests::write_certificate};
     use crate::provider;
+    use crate::publish::ConfigCertificates;
 
     /// Certificates `a` (`a.test`, `www.a.test`), `wild` (`*.b.test`) and `other` (`a.test`,
     /// `c.test`), and listeners that use them: `default` presents `a` to unknown names, `strict`
@@ -169,11 +178,13 @@ mod tests {
             .certificates
             .iter()
             .map(|(name, certificate)| {
-                let loaded = load(&provider(), dir.path(), name, certificate).unwrap();
-                (name.clone(), Arc::new(loaded))
+                let (cert, key) = (certificate.cert.as_deref(), certificate.key.as_deref());
+                let loaded = load(&provider(), dir.path(), name, cert.unwrap(), key.unwrap());
+                (name.clone(), Arc::new(loaded.unwrap()))
             })
             .collect();
-        TlsSnapshot::new(certificates, &config.listeners)
+        let listeners = ConfigCertificates::tls_listeners(&config.listeners);
+        TlsSnapshot::new(certificates, &listeners)
     }
 
     /// Name of the certificate that `listener` presents for `sni`.

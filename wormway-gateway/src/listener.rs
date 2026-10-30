@@ -82,6 +82,7 @@ impl ServiceFactory for HttpListeners {
             keepalive.http1,
             listener.tls.is_some(),
             self.access_log.clone(),
+            self.certificates.challenges().clone(),
         );
         // Pingora loads the system root certificates for its upstream connector here, and
         // panics when that fails, for example when SSL_CERT_FILE names a missing file.

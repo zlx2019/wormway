@@ -51,8 +51,17 @@ pub async fn start_logged(
     certificates_dir: &Path,
     access_log: Option<AccessLog>,
 ) -> Server {
+    start_with(text, Certificates::new(certificates_dir), access_log).await
+}
+
+/// Like [`start`], with `certificates` for the listeners with TLS and the answers to HTTP-01
+/// challenges, and the gateway writing to `access_log` if set.
+pub async fn start_with(
+    text: &str,
+    certificates: Certificates,
+    access_log: Option<AccessLog>,
+) -> Server {
     let mut services = Services::new();
-    let certificates = Certificates::new(certificates_dir);
     certificates.register(&mut services);
     let gateway = Gateway::new(2, certificates);
     match access_log {

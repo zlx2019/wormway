@@ -18,6 +18,7 @@ tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "sig
 tracing.workspace = true
 tracing-log.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
+wormway-acme.workspace = true
 wormway-control = { workspace = true, features = ["ui"] }
 wormway-core = { workspace = true, features = ["schema"] }
 wormway-gateway.workspace = true

@@ -69,6 +69,54 @@ jobs:
       - name: Run doctests
         run: cargo test --workspace --doc --all-features --locked
 
+  # ACME against Pebble, the test certificate authority of Let's Encrypt. pebble-challtestsrv
+  # answers its DNS queries with 127.0.0.1, so that it sends HTTP-01 challenges to the test.
+  acme:
+    name: acme (Pebble)
+    runs-on: ubuntu-latest
+    env:
+      PEBBLE_VERSION: v2.10.1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.24"
+          cache: false
+      - name: Install toolchain
+        run: rustup toolchain install stable --profile minimal
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: nextest
+      - name: Start Pebble
+        run: |
+          go install "github.com/letsencrypt/pebble/v2/cmd/pebble@$PEBBLE_VERSION" \
+            "github.com/letsencrypt/pebble/v2/cmd/pebble-challtestsrv@$PEBBLE_VERSION"
+          bin="$(go env GOPATH)/bin"
+          source="$(go env GOMODCACHE)/github.com/letsencrypt/pebble/v2@$PEBBLE_VERSION"
+          # DNS only: the test listens on the HTTP-01 port, 5002.
+          "$bin/pebble-challtestsrv" -defaultIPv6 "" -http01 "" -https01 "" -tlsalpn01 "" -doh "" \
+            > "$RUNNER_TEMP/challtestsrv.log" 2>&1 &
+          (cd "$source" && PEBBLE_VA_NOSLEEP=1 PEBBLE_WFE_NONCEREJECT=0 \
+            "$bin/pebble" -config test/config/pebble-config.json -dnsserver 127.0.0.1:8053 \
+            > "$RUNNER_TEMP/pebble.log" 2>&1 &)
+          for _ in $(seq 1 30); do
+            curl -fsk https://localhost:14000/dir > /dev/null && break
+            sleep 1
+          done
+          curl -fsk https://localhost:14000/dir
+          echo "WORMWAY_PEBBLE_CA=$source/test/certs/pebble.minica.pem" >> "$GITHUB_ENV"
+      - name: Run the ACME tests against Pebble
+        run: cargo nextest run -p wormway-acme --test pebble --locked
+        env:
+          WORMWAY_PEBBLE_DIRECTORY: https://localhost:14000/dir
+          WORMWAY_REQUIRE_PEBBLE: "1"
+      - name: Show the logs of Pebble
+        if: failure()
+        run: cat "$RUNNER_TEMP/pebble.log" "$RUNNER_TEMP/challtestsrv.log"
+
   # Minimum supported Rust version. Keep it in sync with rust-version in the root Cargo.toml.
   msrv:
     name: msrv (1.98)

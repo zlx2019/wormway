@@ -1,6 +1,6 @@
 #:schema ./wormway.schema.json
 # Example Wormway configuration. Only `version` is required. The values shown for [server], [log],
-# [admin] and [storage] are the defaults.
+# [admin], [storage] and [acme] are the defaults.
 
 version = 1
 
@@ -32,6 +32,13 @@ data_dir = "data"           # relative to the directory of this file
 [config]
 source = "file"             # db (default): dynamic settings live in the database
                             # file: dynamic settings are read from this file
+
+# Certificates that set `acme` come from this certificate authority, and are renewed when a third
+# of their lifetime is left. Using it agrees to the terms of service of the authority.
+[acme]
+directory = "letsencrypt"   # letsencrypt-staging, or the https:// URL of another ACME directory
+# email = "ops@example.com"     # where the authority may write about the account
+# ca = "certs/private-ca.pem"   # authorities of a private ACME directory, relative to this file
 
 # ---- Dynamic settings: read from this file only when config.source = "file" ----
 
@@ -112,3 +119,13 @@ tls = { ca = "certs/internal-ca.crt", cert = "certs/wormway-client.crt", key = "
 [certificates.example]
 cert = "certs/example.crt"
 key = "certs/example.key"
+
+# Or from the certificate authority of [acme]. HTTP-01, the default challenge, needs an HTTP
+# listener on port 80 for the names. Issued certificates are kept in the database.
+[certificates.site]
+acme = { domains = ["example.com", "www.example.com"] }
+
+# Wildcard names need DNS-01, which publishes TXT records through the API of the DNS provider.
+# The configuration refers to the token, { env = "NAME" } or { file = "path" }, never holds it.
+[certificates.wildcard]
+acme = { domains = ["*.example.com"], challenge = "dns-01", dns = { provider = "cloudflare", api_token = { env = "CLOUDFLARE_API_TOKEN" } } }

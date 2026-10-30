@@ -1,12 +1,11 @@
-//! The engine of the certificates: loads them for every configuration and publishes them when
-//! the change commits.
+//! The engine of the certificates: loads those read from files for every configuration, and
+//! publishes them when the change commits, together with those that ACME issued.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use arc_swap::ArcSwap;
 use rustls::crypto::CryptoProvider;
 use tracing::{info, warn};
 use wormway_core::config::{Certificate, Config, Issue, Name};
@@ -15,26 +14,28 @@ use x509_parser::time::ASN1Time;
 
 use crate::load::{Loaded, load};
 use crate::provider;
+use crate::publish::{ConfigCertificates, Published};
 use crate::resolve::TlsSnapshot;
 
-/// Loads the certificates of every configuration and indexes them for its TLS listeners. The
-/// files are read every time, so that replaced files take effect on the next change or reload.
+/// Loads the certificates of every configuration that come from files, and notes the ones that
+/// ACME issues. The files are read every time, so that replaced files take effect on the next
+/// change or reload.
 pub(crate) struct Loader {
     /// Directory that relative certificate paths are resolved against.
     base: PathBuf,
     /// Where the certificates in effect are published.
-    snapshot: Arc<ArcSwap<TlsSnapshot>>,
+    published: Arc<Published>,
 }
 
 impl Loader {
-    /// Creates the engine that publishes to `snapshot`.
-    pub(crate) fn new(base: PathBuf, snapshot: Arc<ArcSwap<TlsSnapshot>>) -> Self {
-        Self { base, snapshot }
+    /// Creates the engine that publishes to `published`.
+    pub(crate) fn new(base: PathBuf, published: Arc<Published>) -> Self {
+        Self { base, published }
     }
 }
 
 impl Engine for Loader {
-    /// Loads every certificate of `config` and indexes them for its TLS listeners.
+    /// Loads the certificates of `config` that come from files, and takes its TLS listeners.
     fn prepare<'a>(
         &'a self,
         config: &'a Config,
@@ -43,7 +44,7 @@ impl Engine for Loader {
             let base = self.base.clone();
             let settings = config.certificates.clone();
             // Reading files and parsing keys block, so they run on the blocking pool.
-            let loaded =
+            let files =
                 tokio::task::spawn_blocking(move || load_all(&provider(), &base, &settings))
                     .await
                     .map_err(|error| {
@@ -52,16 +53,28 @@ impl Engine for Loader {
                             format!("loading stopped: {error}"),
                         )]
                     })??;
+            let acme = config
+                .certificates
+                .iter()
+                .filter(|(_, certificate)| certificate.acme.is_some())
+                .map(|(name, _)| name.clone())
+                .collect();
+            let next = ConfigCertificates {
+                files,
+                acme,
+                listeners: ConfigCertificates::tls_listeners(&config.listeners),
+            };
             let staged: Box<dyn Staged> = Box::new(Publish {
-                target: self.snapshot.clone(),
-                next: Arc::new(TlsSnapshot::new(loaded, &config.listeners)),
+                target: self.published.clone(),
+                next: Arc::new(next),
             });
             Ok(staged)
         })
     }
 }
 
-/// Loads every certificate of `settings`; the problems of all of them come back together.
+/// Loads every certificate of `settings` that comes from files; the problems of all of them
+/// come back together.
 fn load_all(
     provider: &CryptoProvider,
     base: &Path,
@@ -70,7 +83,11 @@ fn load_all(
     let mut loaded = BTreeMap::new();
     let mut issues = Vec::new();
     for (name, certificate) in settings {
-        match load(provider, base, name, certificate) {
+        // Validation made sure that the others get their certificates through ACME.
+        let (Some(cert), Some(key)) = (&certificate.cert, &certificate.key) else {
+            continue;
+        };
+        match load(provider, base, name, cert, key) {
             Ok(certificate) => {
                 loaded.insert(name.clone(), Arc::new(certificate));
             }
@@ -87,16 +104,16 @@ fn load_all(
 /// Certificates loaded for a change, waiting to be published.
 struct Publish {
     /// Where to publish them.
-    target: Arc<ArcSwap<TlsSnapshot>>,
-    /// The certificates and the listener indexes.
-    next: Arc<TlsSnapshot>,
+    target: Arc<Published>,
+    /// The certificates and the TLS listeners of the change.
+    next: Arc<ConfigCertificates>,
 }
 
 impl Staged for Publish {
     /// Publishes the certificates for new handshakes and logs the ones that changed.
     fn commit(self: Box<Self>) {
-        let previous = self.target.swap(self.next.clone());
-        log_changes(&previous, &self.next);
+        let previous = self.target.set_config(self.next);
+        log_changes(&previous, &self.target.snapshot.load());
     }
 }
 
