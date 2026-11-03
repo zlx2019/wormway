@@ -79,6 +79,12 @@
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-good: var(--good);
+  --color-warning: var(--warning);
+  --color-serious: var(--serious);
+  --color-critical: var(--critical);
   --radius-sm: calc(var(--radius) * 0.6);
   --radius-md: calc(var(--radius) * 0.8);
   --radius-lg: var(--radius);
@@ -111,6 +117,15 @@
   --border: oklch(0.922 0 0);
   --input: oklch(0.922 0 0);
   --ring: oklch(0.708 0 0);
+  /* The first two categorical colors of the charts, checked for color vision deficiencies and
+     contrast on the cards; their dark steps follow below. */
+  --chart-1: #2a78d6;
+  --chart-2: #eb6834;
+  /* States, the same in both modes; they always come with an icon and a word. */
+  --good: #0ca30c;
+  --warning: #fab219;
+  --serious: #ec835a;
+  --critical: #d03b3b;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -133,6 +148,8 @@
     --border: oklch(1 0 0 / 10%);
     --input: oklch(1 0 0 / 15%);
     --ring: oklch(0.556 0 0);
+    --chart-1: #3987e5;
+    --chart-2: #d95926;
   }
 }
 

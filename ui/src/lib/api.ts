@@ -80,6 +80,75 @@ export interface NewApiKey extends ChangeResult {
   hash: string
 }
 
+/** The requests of one period: durations in seconds, null without requests. */
+export interface Period {
+  requests: number
+  errors: number
+  p50: number | null
+  p99: number | null
+}
+
+/** The requests of the last full seconds, one entry per second, the oldest first. */
+export interface Series {
+  /** Name of the route or the upstream; absent for all requests. */
+  name?: string
+  requests: number[]
+  errors: number[]
+  p50: (number | null)[]
+  p99: (number | null)[]
+  /** All the seconds together. */
+  summary: Period
+}
+
+/** Answer of `GET /api/v1/stats`. */
+export interface Stats {
+  /** When the last of the seconds ended. */
+  until: string
+  all: Series
+  routes: Series[]
+  upstreams: Series[]
+}
+
+/** How a target of an upstream is doing. */
+export interface TargetHealth {
+  address: string
+  host: string | null
+  weight: number
+  state: "healthy" | "unhealthy" | "ejected"
+  since: string | null
+  until: string | null
+  reason: string | null
+}
+
+/** Answer of `GET /api/v1/status/upstreams`. */
+export interface UpstreamsHealth {
+  upstreams: {
+    name: string
+    health_check: "http" | "tcp" | null
+    passive: boolean
+    targets: TargetHealth[]
+  }[]
+}
+
+/** A certificate of the configuration, the one presented and how ACME is doing with it. */
+export interface CertificateStatus {
+  name: string
+  source: "files" | "acme"
+  current: {
+    names: string[]
+    issuer: string
+    not_before: string
+    not_after: string
+  } | null
+  acme: {
+    renew_at: string | null
+    retry_at: string | null
+    ordering: boolean
+    failures: number
+    last_error: string | null
+  } | null
+}
+
 /** Number of versions loaded at a time. */
 export const PAGE_SIZE = 20
 
@@ -232,6 +301,22 @@ export const api = {
       `/consumers/${name}/password`,
       json("PUT", { password }, { "If-Match": etag })
     ),
+
+  /** The requests of the last minute, by second. */
+  stats: () => request<Stats>("/stats"),
+
+  /** The upstreams in effect and the health of their targets. */
+  health: () => request<UpstreamsHealth>("/status/upstreams"),
+
+  /** The certificates of the configuration in effect and how they are doing. */
+  certificates: () =>
+    request<{ certificates: CertificateStatus[] }>("/status/certificates"),
+
+  /** Orders certificate `name` again through ACME, now. */
+  renew: (name: string) =>
+    request<{ requested: boolean }>(`/certificates/${name}/renew`, {
+      method: "POST",
+    }),
 
   /** Makes a new API key for consumer `name`, if it still has `etag`. */
   addApiKey: (name: string, etag: string) =>

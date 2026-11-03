@@ -1,14 +1,23 @@
+import { useMutation, useQueryClient } from "@tanstack/react-query"
 import type { TFunction } from "i18next"
+import { RefreshCwIcon } from "lucide-react"
 import { useTranslation } from "react-i18next"
 
 import { EntityList, type Kind } from "@/components/entity"
+import {
+  AcmeProgress,
+  CertificateExpiry,
+  TargetState,
+} from "@/components/states"
+import { Button } from "@/components/ui/button"
 import { CertificateForm } from "@/forms/certificate"
 import { JwtForm } from "@/forms/jwt"
 import { ListenerForm } from "@/forms/listener"
 import { RouteForm } from "@/forms/route"
 import { UpstreamForm } from "@/forms/upstream"
-import type { Json, JsonObject } from "@/lib/api"
+import { api, type Json, type JsonObject } from "@/lib/api"
 import { getIn, isObject } from "@/lib/draft"
+import { useCertificates, useHealth } from "@/lib/queries"
 
 /** The routes, edited with their form. */
 export const routes: Kind = {
@@ -126,9 +135,24 @@ export function RoutesPage() {
   )
 }
 
-/** The upstreams and their targets. */
+/** Shows the targets of `upstream` as written, for upstreams without a health report yet. */
+function written(upstream: JsonObject): string {
+  return Array.isArray(upstream.targets)
+    ? upstream.targets
+        .map((target) =>
+          isObject(target) ? String(target.address) : String(target)
+        )
+        .join(", ")
+    : "—"
+}
+
+/** The upstreams and their targets, with the health of each. */
 export function UpstreamsPage() {
   const { t } = useTranslation()
+  const health = useHealth()
+  const reports = new Map(
+    health.data?.upstreams.map((upstream) => [upstream.name, upstream]) ?? []
+  )
   return (
     <EntityList
       table="upstreams"
@@ -138,14 +162,19 @@ export function UpstreamsPage() {
       columns={[
         {
           title: t("upstreams.targets"),
-          render: (upstream) =>
-            Array.isArray(upstream.targets)
-              ? upstream.targets
-                  .map((target) =>
-                    isObject(target) ? String(target.address) : String(target)
-                  )
-                  .join(", ")
-              : "—",
+          render: (upstream, name) => {
+            const report = reports.get(name)
+            if (report === undefined) {
+              return written(upstream)
+            }
+            return (
+              <div className="flex flex-col gap-1">
+                {report.targets.map((target) => (
+                  <TargetState key={target.address} target={target} />
+                ))}
+              </div>
+            )
+          },
         },
         {
           title: t("upstreams.balance"),
@@ -153,6 +182,17 @@ export function UpstreamsPage() {
             typeof upstream.balance === "string"
               ? upstream.balance
               : "round_robin",
+        },
+        {
+          title: t("upstreams.checks"),
+          render: (_, name) => {
+            const report = reports.get(name)
+            const checks = [
+              report?.health_check?.toUpperCase(),
+              report?.passive && t("upstreams.passive"),
+            ]
+            return checks.filter(Boolean).join(" · ") || "—"
+          },
         },
       ]}
     />
@@ -182,9 +222,14 @@ export function ListenersPage() {
   )
 }
 
-/** The certificates and where they come from. */
+/** The certificates, where they come from, when they expire and how ACME is doing with
+ * them. */
 export function CertificatesPage() {
   const { t } = useTranslation()
+  const report = useCertificates()
+  const statuses = new Map(
+    report.data?.certificates.map((status) => [status.name, status]) ?? []
+  )
   return (
     <EntityList
       table="certificates"
@@ -199,14 +244,75 @@ export function CertificatesPage() {
         },
         {
           title: t("certificates.covers"),
-          render: (certificate) =>
-            isObject(certificate.acme)
+          render: (certificate, name) => {
+            const presented = statuses.get(name)?.current
+            if (presented) {
+              return items(presented.names)
+            }
+            return isObject(certificate.acme)
               ? items(certificate.acme.domains)
               : typeof certificate.cert === "string"
                 ? certificate.cert
-                : "—",
+                : "—"
+          },
+        },
+        {
+          title: t("certificates.expires"),
+          render: (_, name) => {
+            const status = statuses.get(name)
+            return status ? <CertificateExpiry certificate={status} /> : "—"
+          },
+        },
+        {
+          title: "ACME",
+          render: (certificate, name) => {
+            const status = statuses.get(name)
+            if (!isObject(certificate.acme) || status === undefined) {
+              return "—"
+            }
+            return (
+              <div className="flex flex-col items-start gap-1">
+                <AcmeProgress certificate={status} />
+                <RenewButton name={name} />
+              </div>
+            )
+          },
         },
       ]}
     />
+  )
+}
+
+/** Orders certificate `name` again through ACME, now. */
+function RenewButton({ name }: { name: string }) {
+  const { t } = useTranslation()
+  const queryClient = useQueryClient()
+  const renew = useMutation({
+    mutationFn: () => api.renew(name),
+    onSettled: () =>
+      void queryClient.invalidateQueries({ queryKey: ["certificates"] }),
+  })
+  if (renew.isSuccess) {
+    return (
+      <span className="text-muted-foreground text-xs">
+        {t("certificates.requested")}
+      </span>
+    )
+  }
+  return (
+    <>
+      <Button
+        variant="outline"
+        size="xs"
+        disabled={renew.isPending}
+        onClick={() => renew.mutate()}
+      >
+        <RefreshCwIcon />
+        {t("certificates.renew")}
+      </Button>
+      {renew.isError && (
+        <span className="text-destructive text-xs">{renew.error.message}</span>
+      )}
+    </>
   )
 }

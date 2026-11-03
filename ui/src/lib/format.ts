@@ -24,3 +24,29 @@ export function formatTime(timestamp: string, language: string): string {
     { dateStyle: "medium", timeStyle: "medium" }
   )
 }
+
+/** Formats a count, with one decimal at most, in `language`. */
+export function formatCount(value: number, language: string): string {
+  return value.toLocaleString(language === "zh" ? "zh-CN" : "en", {
+    maximumFractionDigits: 1,
+  })
+}
+
+/** Formats a duration in seconds: milliseconds below a second, seconds from there. */
+export function formatSeconds(seconds: number): string {
+  if (seconds >= 1) {
+    return `${seconds.toFixed(2)} s`
+  }
+  const millis = seconds * 1000
+  return `${millis < 10 ? millis.toFixed(1).replace(/\.0$/, "") : Math.round(millis)} ms`
+}
+
+/** Formats a share from 0 to 1 as a percentage. */
+export function formatShare(share: number): string {
+  return `${(share * 100).toFixed(share > 0 && share < 0.1 ? 1 : 0)}%`
+}
+
+/** Whole days from now until `timestamp`, an RFC 3339 time; negative once it is past. */
+export function daysUntil(timestamp: string): number {
+  return Math.floor((Date.parse(timestamp) - Date.now()) / 86_400_000)
+}
