@@ -51,6 +51,35 @@ export interface ChangeResult {
   changed: boolean
 }
 
+/** A JSON value. */
+export type Json = string | number | boolean | null | Json[] | JsonObject
+
+/** A JSON object. */
+export interface JsonObject {
+  [key: string]: Json
+}
+
+/** The tables of the dynamic settings that the API changes one entity at a time. */
+export type Table =
+  | "listeners"
+  | "routes"
+  | "upstreams"
+  | "certificates"
+  | "consumers"
+  | "jwt"
+
+/** A value with its entity tag, which a change sends back to guard against overwriting. */
+export interface Tagged<T> {
+  value: T
+  etag: string | null
+}
+
+/** Answer of `POST /api/v1/consumers/{name}/api-keys`: the key, shown this once. */
+export interface NewApiKey extends ChangeResult {
+  key: string
+  hash: string
+}
+
 /** Number of versions loaded at a time. */
 export const PAGE_SIZE = 20
 
@@ -87,6 +116,35 @@ async function request<T>(
   init: RequestInit = {},
   token = getToken()
 ): Promise<T> {
+  return (await send<T>(path, init, token)).value
+}
+
+/** Calls the Admin API like `request`, and returns the answer with its entity tag. */
+function tagged<T>(path: string, init: RequestInit = {}): Promise<Tagged<T>> {
+  return send<T>(path, init, getToken())
+}
+
+/** Headers of a change that guards against overwriting: the entity must still have `etag`, or
+ * must not exist yet without one. */
+function conditions(etag: string | null): Record<string, string> {
+  return etag === null ? { "If-None-Match": "*" } : { "If-Match": etag }
+}
+
+/** Options of a request with `value` as its JSON body. */
+function json(method: string, value: Json, headers = {}): RequestInit {
+  return {
+    method,
+    headers: { ...headers, "Content-Type": "application/json" },
+    body: JSON.stringify(value),
+  }
+}
+
+/** Sends a request to the Admin API and reads the JSON answer and its entity tag. */
+async function send<T>(
+  path: string,
+  init: RequestInit,
+  token: string | null
+): Promise<Tagged<T>> {
   const headers = new Headers(init.headers)
   // Versions saved from here are marked as changes made in the dashboard.
   headers.set("Wormway-Client", "ui")
@@ -107,7 +165,7 @@ async function request<T>(
       error?.details ?? []
     )
   }
-  return body as T
+  return { value: body as T, etag: response.headers.get("ETag") }
 }
 
 /** The endpoints of the Admin API the dashboard uses. */
@@ -134,5 +192,51 @@ export const api = {
     request<ChangeResult>(`/config/versions/${id}/rollback`, {
       method: "POST",
       headers: current === null ? {} : { "If-Match": `"${current}"` },
+    }),
+
+  /** Every entity of `table`, by name. */
+  entities: async (table: Table) => {
+    const body = await request<Record<string, Record<string, JsonObject>>>(
+      `/${table}`
+    )
+    return body[table] ?? {}
+  },
+
+  /** Entity `name` of `table`, with its entity tag. */
+  entity: (table: Table, name: string) =>
+    tagged<JsonObject>(`/${table}/${name}`),
+
+  /** Saves entity `name` of `table`: replaces it if it still has `etag`, or creates it
+   * without one if it does not exist. Answers with the entity tag it has now. */
+  saveEntity: (
+    table: Table,
+    name: string,
+    value: JsonObject,
+    etag: string | null
+  ) =>
+    tagged<ChangeResult>(
+      `/${table}/${name}`,
+      json("PUT", value, conditions(etag))
+    ),
+
+  /** Removes entity `name` of `table`, if it still has `etag`. */
+  deleteEntity: (table: Table, name: string, etag: string | null) =>
+    request<ChangeResult>(`/${table}/${name}`, {
+      method: "DELETE",
+      headers: etag === null ? {} : { "If-Match": etag },
+    }),
+
+  /** Sets the password of consumer `name`, if it still has `etag`. */
+  setPassword: (name: string, password: string, etag: string) =>
+    tagged<ChangeResult>(
+      `/consumers/${name}/password`,
+      json("PUT", { password }, { "If-Match": etag })
+    ),
+
+  /** Makes a new API key for consumer `name`, if it still has `etag`. */
+  addApiKey: (name: string, etag: string) =>
+    tagged<NewApiKey>(`/consumers/${name}/api-keys`, {
+      method: "POST",
+      headers: { "If-Match": etag },
     }),
 }

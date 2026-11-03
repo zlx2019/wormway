@@ -8,10 +8,23 @@ import {
   useLocation,
 } from "react-router"
 
+import { EntityEditor, type Kind, NEW } from "@/components/entity"
 import { Layout } from "@/components/layout"
 import { ApiError } from "@/lib/api"
 import { useToken } from "@/lib/auth"
 import { ConfigPage } from "@/pages/config"
+import { ConsumerPage, ConsumersPage } from "@/pages/consumers"
+import {
+  CertificatesPage,
+  certificates,
+  jwt,
+  ListenersPage,
+  listeners,
+  RoutesPage,
+  routes,
+  UpstreamsPage,
+  upstreams,
+} from "@/pages/entities"
 import { LoginPage } from "@/pages/login"
 import { NotFoundPage } from "@/pages/not-found"
 import { OverviewPage } from "@/pages/overview"
@@ -43,6 +56,15 @@ export function App() {
             }
           >
             <Route index element={<OverviewPage />} />
+            {entityRoutes(routes, <RoutesPage />)}
+            {entityRoutes(upstreams, <UpstreamsPage />)}
+            {entityRoutes(listeners, <ListenersPage />)}
+            {entityRoutes(certificates, <CertificatesPage />)}
+            <Route path="consumers" element={<ConsumersPage />} />
+            <Route path={`consumers/${NEW}`} element={<ConsumerPage />} />
+            <Route path="consumers/:name" element={<ConsumerPage />} />
+            <Route path={`jwt/${NEW}`} element={<EntityEditor kind={jwt} />} />
+            <Route path="jwt/:name" element={<EntityEditor kind={jwt} />} />
             <Route path="config" element={<ConfigPage />} />
             <Route path="versions" element={<VersionsPage />} />
             <Route path="versions/:id" element={<VersionPage />} />
@@ -52,6 +74,24 @@ export function App() {
       </BrowserRouter>
     </QueryClientProvider>
   )
+}
+
+/** The pages of the entities of `kind`: `list`, a new one, and each one by name. */
+function entityRoutes(kind: Kind, list: ReactNode) {
+  const path = kind.path.slice(1)
+  return [
+    <Route key="list" path={path} element={list} />,
+    <Route
+      key="new"
+      path={`${path}/${NEW}`}
+      element={<EntityEditor kind={kind} />}
+    />,
+    <Route
+      key="one"
+      path={`${path}/:name`}
+      element={<EntityEditor kind={kind} />}
+    />,
+  ]
 }
 
 /** Shows `children` when signed in; otherwise the sign-in page, which comes back here. */

@@ -2,23 +2,29 @@ import { useQueryClient } from "@tanstack/react-query"
 import { cn } from "cn"
 import { LogOutIcon } from "lucide-react"
 import { useTranslation } from "react-i18next"
-import { NavLink, Outlet } from "react-router"
+import { NavLink, Outlet, useLocation } from "react-router"
 
 import { LanguageSwitch } from "@/components/language-switch"
 import { Button } from "@/components/ui/button"
 import { setToken } from "@/lib/auth"
 
-/** Pages in the navigation, with the key of their title. */
+/** Pages in the navigation, with the key of their title and other paths that belong to them. */
 const pages = [
-  { to: "/", title: "nav.overview", end: true },
-  { to: "/config", title: "nav.config", end: false },
-  { to: "/versions", title: "nav.versions", end: false },
+  { to: "/", title: "nav.overview", end: true, also: [] },
+  { to: "/routes", title: "nav.routes", end: false, also: [] },
+  { to: "/upstreams", title: "nav.upstreams", end: false, also: [] },
+  { to: "/listeners", title: "nav.listeners", end: false, also: [] },
+  { to: "/certificates", title: "nav.certificates", end: false, also: [] },
+  { to: "/consumers", title: "nav.consumers", end: false, also: ["/jwt"] },
+  { to: "/config", title: "nav.config", end: false, also: [] },
+  { to: "/versions", title: "nav.versions", end: false, also: [] },
 ] as const
 
 /** Frame of the signed-in pages: navigation, language switch and sign-out. */
 export function Layout() {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
+  const { pathname } = useLocation()
 
   /** Forgets the token and everything loaded with it. */
   function signOut() {
@@ -40,7 +46,11 @@ export function Layout() {
                 className={({ isActive }) =>
                   cn(
                     "text-muted-foreground transition-colors hover:text-foreground",
-                    isActive && "font-medium text-foreground"
+                    (isActive ||
+                      page.also.some((path: string) =>
+                        pathname.startsWith(path)
+                      )) &&
+                      "font-medium text-foreground"
                   )
                 }
               >
