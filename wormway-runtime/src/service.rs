@@ -14,7 +14,7 @@ use wormway_core::config::{Listener, Name, Protocol};
 use crate::engine::Engine;
 use crate::health::HealthReport;
 use crate::stats::StatsReport;
-use crate::tls::TlsReport;
+use crate::tls::{AcmeReport, TlsReport};
 
 /// A boxed future, as returned by [`Service`] and [`Engine`] methods.
 pub type BoxFuture<'a, T = ()> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -58,8 +58,8 @@ pub trait ServiceFactory: Send + Sync + 'static {
 }
 
 /// Service factories by protocol, the engines that build their shared state, and the reports
-/// of the health of the upstreams, of the certificates and of the traffic. A listener whose
-/// protocol has no factory is rejected.
+/// of the health of the upstreams, of the certificates, of ACME and of the traffic. A listener
+/// whose protocol has no factory is rejected.
 #[derive(Default)]
 pub struct Services {
     /// The factory of each available protocol.
@@ -70,6 +70,8 @@ pub struct Services {
     health: Option<Arc<dyn HealthReport>>,
     /// Reports the certificates in effect, if a service has certificates.
     tls: Option<Arc<dyn TlsReport>>,
+    /// Reports the certificates that ACME manages and renews them on request, if ACME runs.
+    acme: Option<Arc<dyn AcmeReport>>,
     /// Reports the traffic of the last minute, if a service counts it.
     stats: Option<Arc<dyn StatsReport>>,
 }
@@ -100,6 +102,11 @@ impl Services {
         self.tls = Some(Arc::new(report));
     }
 
+    /// Sets the report of the certificates that ACME manages, replacing any previous one.
+    pub fn set_acme_report(&mut self, report: impl AcmeReport) {
+        self.acme = Some(Arc::new(report));
+    }
+
     /// Sets the report of the traffic of the last minute, replacing any previous one.
     pub fn set_stats_report(&mut self, report: impl StatsReport) {
         self.stats = Some(Arc::new(report));
@@ -118,6 +125,11 @@ impl Services {
     /// Returns the report of the certificates in effect, if any.
     pub(crate) fn tls_report(&self) -> Option<&Arc<dyn TlsReport>> {
         self.tls.as_ref()
+    }
+
+    /// Returns the report of the certificates that ACME manages, if any.
+    pub(crate) fn acme_report(&self) -> Option<&Arc<dyn AcmeReport>> {
+        self.acme.as_ref()
     }
 
     /// Returns the report of the traffic of the last minute, if any.

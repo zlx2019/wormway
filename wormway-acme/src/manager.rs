@@ -16,10 +16,11 @@ use tokio::sync::watch;
 use tracing::{info, warn};
 use wormway_core::config::{AcmeChallenge, Name};
 use wormway_core::time::rfc3339;
+use wormway_runtime::AcmeCertificateReport;
 use wormway_tls::IssuedCertificate;
 
 use crate::engine::{Desired, Order, covers};
-use crate::{RENEWALS_TOTAL, Shared, StoredCertificate, https, issue, reason, schedule};
+use crate::{RENEWALS_TOTAL, Shared, StoredCertificate, https, issue, lock, reason, schedule};
 
 /// How often the renewal information of the certificate authority is looked at.
 const CHECK_INTERVAL: Duration = Duration::from_secs(12 * 3600);
@@ -67,6 +68,18 @@ impl Managed {
         self.retry_at
             .map_or(self.renew_at, |retry| retry.max(self.renew_at))
     }
+
+    /// Returns the report of certificate `name`, which is being ordered if `ordering`.
+    fn report(&self, name: &Name, ordering: bool) -> AcmeCertificateReport {
+        AcmeCertificateReport {
+            name: name.clone(),
+            renew_at: self.current.as_ref().map(|_| self.renew_at),
+            retry_at: self.retry_at,
+            ordering,
+            failures: self.failures,
+            last_error: self.last_error.clone(),
+        }
+    }
 }
 
 /// Manages the certificates that `desired` hands over, for as long as the engine can hand
@@ -86,12 +99,14 @@ pub(crate) async fn run(shared: Arc<Shared>, mut desired: watch::Receiver<Arc<De
             reconcile(&shared, &mut managed, &current).await;
             seen = Some(current.clone());
         }
+        take_renewals(&shared, &mut managed);
         if SystemTime::now() >= next_check {
             if ari {
                 ari = check_renewal_info(&shared, &mut managed).await;
             }
             next_check = SystemTime::now() + spread(CHECK_INTERVAL);
         }
+        publish(&shared, &managed, None);
         let now = SystemTime::now();
         let due: Vec<Name> = managed
             .iter()
@@ -99,9 +114,11 @@ pub(crate) async fn run(shared: Arc<Shared>, mut desired: watch::Receiver<Arc<De
             .map(|(name, _)| name.clone())
             .collect();
         for name in due {
+            publish(&shared, &managed, Some(&name));
             if let Some(state) = managed.get_mut(&name) {
                 renew(&shared, &mut account, &name, state, current.port_80).await;
             }
+            publish(&shared, &managed, None);
         }
         let wake = managed
             .values()
@@ -116,6 +133,7 @@ pub(crate) async fn run(shared: Arc<Shared>, mut desired: watch::Receiver<Arc<De
                     return;
                 }
             }
+            () = shared.wake.notified() => {}
             () = tokio::time::sleep(wait) => {}
         }
     }
@@ -157,6 +175,30 @@ async fn reconcile(shared: &Shared, managed: &mut BTreeMap<Name, Managed>, desir
             managed.insert(name.clone(), Managed::new(shared, name, order));
         }
     }
+}
+
+/// Makes the certificates whose renewal was asked for due at once, also during the wait after
+/// a failure. Failures still count, so the next wait is longer if the order fails again.
+fn take_renewals(shared: &Shared, managed: &mut BTreeMap<Name, Managed>) {
+    let asked = std::mem::take(&mut *lock(&shared.renewals));
+    let now = SystemTime::now();
+    for name in asked {
+        if let Some(state) = managed.get_mut(&name) {
+            info!(certificate = %name, "renewal asked for");
+            state.renew_at = now;
+            state.retry_at = None;
+        }
+    }
+}
+
+/// Tells the report how the manager is doing with each certificate; `ordering` is being
+/// ordered.
+fn publish(shared: &Shared, managed: &BTreeMap<Name, Managed>, ordering: Option<&Name>) {
+    let report = managed
+        .iter()
+        .map(|(name, state)| state.report(name, ordering == Some(name)))
+        .collect();
+    *lock(&shared.report) = report;
 }
 
 /// Orders a certificate for `state`, then stores and installs it, or waits longer after each

@@ -5,8 +5,8 @@
 //! Protocols plug in through [`ServiceFactory`], and state shared by their services, such as a
 //! routing table, through [`Engine`]; [`Server`] runs the listeners of a configuration and
 //! applies new ones. A [`HealthReport`] tells how the targets of the upstreams are doing, a
-//! [`TlsReport`] which certificates are in effect, and a [`StatsReport`] how much traffic there
-//! was in the last minute.
+//! [`TlsReport`] which certificates are in effect, an [`AcmeReport`] how ACME is getting its
+//! certificates, and a [`StatsReport`] how much traffic there was in the last minute.
 
 mod engine;
 mod health;
@@ -25,4 +25,4 @@ pub use server::{ApplyError, Prepared, Server};
 pub use service::{BoxError, BoxFuture, Connection, Service, ServiceFactory, Services, Shutdown};
 pub use snapshot::Snapshot;
 pub use stats::{PeriodReport, SeriesReport, StatsReport, TrafficReport};
-pub use tls::{CertificateReport, TlsReport};
+pub use tls::{AcmeCertificateReport, AcmeReport, CertificateReport, TlsReport};

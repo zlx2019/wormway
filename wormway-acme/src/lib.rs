@@ -7,24 +7,28 @@
 //! certificates and renews the others, one at a time, on the runtime of the control plane. The
 //! HTTP listeners answer HTTP-01 challenges from the [`Challenges`](wormway_tls::Challenges) of
 //! the certificates; DNS-01 challenges go through the DNS provider of the certificate. Accounts
-//! and issued certificates live in a [`Storage`].
+//! and issued certificates live in a [`Storage`]. The runtime learns from ACME how it is doing
+//! with each certificate, and passes renewals asked for on to the manager.
 
 mod cloudflare;
 mod engine;
 mod https;
 mod issue;
 mod manager;
+mod report;
 mod schedule;
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use tokio::sync::watch;
+use tokio::sync::{Notify, watch};
 use wormway_core::config::{AcmeSettings, Name};
-use wormway_runtime::{BoxError, BoxFuture, Services};
+use wormway_runtime::{AcmeCertificateReport, BoxError, BoxFuture, Services};
 use wormway_tls::{Certificates, IssuedCertificate};
 
 use crate::engine::{AcmeEngine, Desired};
+use crate::report::Report;
 
 /// Certificates ordered through ACME, by result.
 const RENEWALS_TOTAL: &str = "wormway_acme_renewals_total";
@@ -112,6 +116,9 @@ impl Acme {
             storage: Box::new(storage),
             base,
             desired,
+            report: Mutex::default(),
+            renewals: Mutex::default(),
+            wake: Notify::new(),
         };
         Self {
             shared: Arc::new(shared),
@@ -120,9 +127,10 @@ impl Acme {
     }
 
     /// Registers the engine that learns the ACME certificates of every configuration with
-    /// `services`.
+    /// `services`, and the report of how ACME is doing with them.
     pub fn register(&self, services: &mut Services) {
         services.add_engine(AcmeEngine::new(self.shared.clone()));
+        services.set_acme_report(Report::new(self.shared.clone()));
     }
 
     /// Orders the missing certificates and renews the others before they expire, one at a time,
@@ -130,6 +138,12 @@ impl Acme {
     pub async fn run(self) {
         manager::run(self.shared, self.desired).await;
     }
+}
+
+/// Locks `mutex`, also after a thread panicked while holding it: what it guards is replaced
+/// whole, so it is never left half changed.
+pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Returns `error` with the errors that caused it, as `outer: inner: innermost`, leaving out a
@@ -165,6 +179,12 @@ pub(crate) struct Shared {
     base: PathBuf,
     /// Hands the certificates of the configuration in effect to the manager.
     desired: watch::Sender<Arc<Desired>>,
+    /// How the manager is doing with each certificate, as it last told.
+    report: Mutex<Vec<AcmeCertificateReport>>,
+    /// Certificates to order again as soon as possible, as asked for through the report.
+    renewals: Mutex<BTreeSet<Name>>,
+    /// Wakes the manager when a renewal is asked for.
+    wake: Notify,
 }
 
 impl Shared {

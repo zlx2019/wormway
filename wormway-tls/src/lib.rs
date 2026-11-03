@@ -193,12 +193,15 @@ impl IssuedCertificate {
 impl TlsReport for Certificates {
     /// Returns the certificates in effect, in name order. Validity before 1970 counts as 1970.
     fn certificates(&self) -> Vec<CertificateReport> {
+        let time = |secs: i64| UNIX_EPOCH + Duration::from_secs(u64::try_from(secs).unwrap_or(0));
         self.details()
             .into_iter()
             .map(|(name, info)| CertificateReport {
                 name,
-                not_after: UNIX_EPOCH
-                    + Duration::from_secs(u64::try_from(info.not_after).unwrap_or(0)),
+                not_before: time(info.not_before),
+                not_after: time(info.not_after),
+                names: info.names,
+                issuer: info.issuer,
             })
             .collect()
     }
@@ -216,10 +219,53 @@ pub fn provider() -> Arc<CryptoProvider> {
 #[cfg(test)]
 mod tests {
     use rcgen::{
-        BasicConstraints, CertificateParams, CertifiedIssuer, IsCa, KeyPair, SerialNumber,
+        BasicConstraints, CertificateParams, CertifiedIssuer, DistinguishedName, DnType, IsCa,
+        KeyPair, SerialNumber, date_time_ymd,
     };
 
     use super::*;
+    use crate::publish::ConfigCertificates;
+
+    /// The report tells the host names, the issuer and the validity of each certificate in
+    /// effect.
+    #[test]
+    fn reports_the_certificates_in_effect() {
+        let mut authority = CertificateParams::new(Vec::<String>::new()).unwrap();
+        authority.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        authority.distinguished_name = DistinguishedName::new();
+        authority
+            .distinguished_name
+            .push(DnType::CommonName, "Test CA");
+        let issuer = CertifiedIssuer::self_signed(authority, KeyPair::generate().unwrap()).unwrap();
+        let names = vec!["site.test".to_owned(), "WWW.site.test".to_owned()];
+        let mut params = CertificateParams::new(names).unwrap();
+        params.not_before = date_time_ymd(2026, 1, 2);
+        params.not_after = date_time_ymd(2027, 3, 4);
+        let key = KeyPair::generate().unwrap();
+        let cert = params.signed_by(&key, &issuer).unwrap();
+        let loaded = parse_issued(&provider(), &cert.pem(), &key.serialize_pem()).unwrap();
+        assert_ne!(loaded.info.subject, "CN=Test CA");
+        let site: Name = "site".parse().unwrap();
+        let certificates = Certificates::new(".");
+        certificates
+            .published
+            .set_config(Arc::new(ConfigCertificates {
+                files: BTreeMap::from([(site.clone(), Arc::new(loaded))]),
+                ..ConfigCertificates::default()
+            }));
+
+        let at = |secs| UNIX_EPOCH + Duration::from_secs(secs);
+        assert_eq!(
+            TlsReport::certificates(&certificates),
+            [CertificateReport {
+                name: site,
+                names: vec!["site.test".to_owned(), "www.site.test".to_owned()],
+                issuer: "CN=Test CA".to_owned(),
+                not_before: at(1_767_312_000),
+                not_after: at(1_804_118_400),
+            }]
+        );
+    }
 
     /// A certificate signed by an authority tells the key identifier of the authority and its
     /// serial number; a self-signed one has no authority key identifier.

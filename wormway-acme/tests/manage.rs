@@ -1,17 +1,20 @@
 //! Integration tests of ACME that need no certificate authority: certificates issued before
-//! come back from storage, the tokens of DNS providers must be readable, and certificates that
-//! the configuration drops are removed.
+//! come back from storage, the tokens of DNS providers must be readable, certificates that the
+//! configuration drops are removed, and the report tells how orders go.
 
 mod common;
 
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use rcgen::{CertificateParams, KeyPair};
+use tokio::net::TcpListener;
 use tokio::runtime::Handle;
+use tokio::sync::Notify;
 use tokio::time::Instant;
 use wormway_acme::{Acme, StoredCertificate};
 use wormway_core::config::{Config, ConfigError, Name};
-use wormway_runtime::{ApplyError, Server, Services};
+use wormway_runtime::{AcmeCertificateReport, ApplyError, Server, Services};
 use wormway_tls::Certificates;
 
 use crate::common::Memory;
@@ -29,10 +32,17 @@ fn issued(domains: &[&str]) -> StoredCertificate {
 
 /// A certificate for `domains` from [`DIRECTORY`] that is valid until the start of `year`.
 fn issued_until(domains: &[&str], year: i32) -> StoredCertificate {
+    issued_within(domains, 1975, year)
+}
+
+/// A certificate for `domains` from [`DIRECTORY`] that is valid from the start of year `from`
+/// until the start of year `until`.
+fn issued_within(domains: &[&str], from: i32, until: i32) -> StoredCertificate {
     let key = KeyPair::generate().expect("key");
     let names: Vec<String> = domains.iter().map(|domain| (*domain).to_owned()).collect();
     let mut params = CertificateParams::new(names.clone()).expect("certificate parameters");
-    params.not_after = rcgen::date_time_ymd(year, 1, 1);
+    params.not_before = rcgen::date_time_ymd(from, 1, 1);
+    params.not_after = rcgen::date_time_ymd(until, 1, 1);
     let cert = params.self_signed(&key).expect("certificate");
     StoredCertificate {
         directory: DIRECTORY.to_owned(),
@@ -44,15 +54,24 @@ fn issued_until(domains: &[&str], year: i32) -> StoredCertificate {
 
 /// The configuration of [`DIRECTORY`] with the certificates of `text`.
 fn config(text: &str) -> Config {
+    config_at(DIRECTORY, text)
+}
+
+/// The configuration of ACME directory `directory` with the certificates of `text`.
+fn config_at(directory: &str, text: &str) -> Config {
     let text = format!(
-        "version = 1\n[config]\nsource = \"file\"\n[acme]\ndirectory = \"{DIRECTORY}\"\n{text}"
+        "version = 1\n[config]\nsource = \"file\"\n[acme]\ndirectory = \"{directory}\"\n{text}"
     );
     Config::from_toml(&text).expect("configuration")
 }
 
 /// Starts a server with the certificates and ACME on `storage`, and returns it with them.
 async fn start(text: &str, storage: Memory) -> (Server, Certificates, Acme) {
-    let config = config(text);
+    start_at(config(text), storage).await
+}
+
+/// Starts a server like [`start`], with `config`.
+async fn start_at(config: Config, storage: Memory) -> (Server, Certificates, Acme) {
     let mut services = Services::new();
     let certificates = Certificates::new(".");
     certificates.register(&mut services);
@@ -221,4 +240,125 @@ async fn keeps_newer_installed_certificates() {
     server.apply(config(text)).await.expect("apply");
     let installed = certificates.issued(&site).expect("installed");
     assert_eq!(installed.info().not_after, newer.info().not_after);
+}
+
+/// Waits until the report has a certificate that `found` accepts, and returns it.
+async fn reported(
+    server: &Server,
+    found: impl Fn(&AcmeCertificateReport) -> bool,
+) -> AcmeCertificateReport {
+    let deadline = Instant::now() + LIMIT;
+    loop {
+        if let Some(report) = server.acme_certificates().into_iter().find(&found) {
+            return report;
+        }
+        let reports = server.acme_certificates();
+        assert!(Instant::now() < deadline, "not reported: {reports:?}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// How long after now the next order of `report` is placed.
+fn retry_in(report: &AcmeCertificateReport) -> Duration {
+    let retry_at = report.retry_at.expect("a time to try again");
+    retry_at
+        .duration_since(SystemTime::now())
+        .expect("in the future")
+}
+
+/// The report tells how an order went: failed, why, and that the next one comes an hour later.
+/// A renewal asked for orders again at once, and the wait after it is longer. Certificates
+/// that ACME does not manage cannot be renewed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reports_failures_and_renews_on_request() {
+    let text = "[certificates.site]\nacme = { domains = [\"site.test\"] }\n";
+    let (server, _certificates, acme) = start(text, Memory::default()).await;
+    let site: Name = "site".parse().expect("name");
+    assert!(server.acme_certificates().is_empty());
+    tokio::spawn(acme.run());
+
+    let report = reported(&server, |report| report.failures == 1).await;
+    assert_eq!(report.name, site);
+    assert_eq!((report.renew_at, report.ordering), (None, false));
+    let error = report.last_error.as_deref().expect("why it failed");
+    let expected = format!("cannot create an ACME account at {DIRECTORY}: ");
+    assert!(error.starts_with(&expected), "{error}");
+    let wait = retry_in(&report);
+    assert!(wait > Duration::from_secs(3500), "{wait:?}");
+
+    assert!(server.renew_certificate(&site));
+    let report = reported(&server, |report| report.failures == 2).await;
+    let wait = retry_in(&report);
+    assert!(wait > Duration::from_secs(7100), "{wait:?}");
+    assert!(!server.renew_certificate(&"other".parse().expect("name")));
+}
+
+/// A certificate issued before is renewed when a third of its lifetime is left, as the report
+/// tells; a renewal asked for orders it at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn renews_issued_certificates_on_request() {
+    let storage = Memory::default();
+    let site: Name = "site".parse().expect("name");
+    let stored = issued_within(&["site.test"], 2026, 2029);
+    storage
+        .certificates
+        .lock()
+        .expect("lock")
+        .insert(site.clone(), stored);
+    let text = "[certificates.site]\nacme = { domains = [\"site.test\"] }\n";
+    let (server, _certificates, acme) = start(text, storage).await;
+    tokio::spawn(acme.run());
+
+    let report = reported(&server, |report| report.renew_at.is_some()).await;
+    // A third of the three years, 365 days and 8 hours, before the end: 2028-01-01T16:00Z.
+    let renew_at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_830_355_200);
+    assert_eq!(report.renew_at, Some(renew_at));
+    assert_eq!((report.retry_at, report.failures), (None, 0));
+
+    assert!(server.renew_certificate(&site));
+    let report = reported(&server, |report| report.failures == 1).await;
+    assert!(report.last_error.is_some());
+}
+
+/// While an order is in progress the report says so, and a renewal asked for meanwhile does not
+/// order the certificate once more after it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reports_orders_in_progress() {
+    // A directory that takes connections and never answers, until `release` drops them.
+    let silent = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let directory = format!(
+        "https://{}/directory",
+        silent.local_addr().expect("address")
+    );
+    let release = Arc::new(Notify::new());
+    tokio::spawn({
+        let release = release.clone();
+        async move {
+            let mut held = Vec::new();
+            loop {
+                tokio::select! {
+                    accepted = silent.accept() => match accepted {
+                        Ok((stream, _)) => held.push(stream),
+                        Err(_) => return,
+                    },
+                    () = release.notified() => return,
+                }
+            }
+        }
+    });
+    let text = "[certificates.site]\nacme = { domains = [\"site.test\"] }\n";
+    let (server, _certificates, acme) =
+        start_at(config_at(&directory, text), Memory::default()).await;
+    let site: Name = "site".parse().expect("name");
+    tokio::spawn(acme.run());
+
+    let report = reported(&server, |report| report.ordering).await;
+    assert_eq!((report.failures, report.last_error), (0, None));
+    assert!(server.renew_certificate(&site));
+    release.notify_one();
+    let report = reported(&server, |report| report.failures == 1).await;
+    assert!(!report.ordering);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let reports = server.acme_certificates();
+    assert_eq!(reports[0].failures, 1, "ordered once more: {reports:?}");
 }

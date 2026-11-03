@@ -1,7 +1,11 @@
-//! The Admin API: status, configuration and metrics over HTTP, behind a bearer token.
+//! The Admin API: status, configuration, entities and metrics over HTTP, behind a bearer
+//! token.
 
 mod auth;
+mod certificates;
 mod config;
+mod credentials;
+mod entity;
 mod error;
 mod status;
 
@@ -13,7 +17,7 @@ use std::time::Instant;
 use axum::Router;
 use axum::http::StatusCode;
 use axum::middleware;
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use wormway_core::config::ConfigSource;
@@ -74,6 +78,7 @@ impl Admin {
         let protected = Router::new()
             .route("/api/v1/status", get(status::status))
             .route("/api/v1/status/upstreams", get(status::upstreams))
+            .route("/api/v1/status/certificates", get(certificates::status))
             .route("/api/v1/stats", get(status::stats))
             .route("/api/v1/config", get(config::show).put(config::replace))
             .route("/api/v1/config/validate", post(config::validate))
@@ -83,11 +88,23 @@ impl Admin {
                 "/api/v1/config/versions/{id}/rollback",
                 post(config::rollback),
             )
-            .route("/metrics", get(status::metrics))
-            .route_layer(middleware::from_fn_with_state(
-                self.clone(),
-                auth::authorize,
-            ));
+            .route(
+                "/api/v1/certificates/{name}/renew",
+                post(certificates::renew),
+            )
+            .route(
+                "/api/v1/consumers/{name}/password",
+                put(credentials::set_password),
+            )
+            .route(
+                "/api/v1/consumers/{name}/api-keys",
+                post(credentials::add_api_key),
+            )
+            .route("/metrics", get(status::metrics));
+        let protected = entity::routes(protected).route_layer(middleware::from_fn_with_state(
+            self.clone(),
+            auth::authorize,
+        ));
         let router = Router::new()
             .route("/healthz", get(status::healthz))
             .merge(protected);

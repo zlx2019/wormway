@@ -2,13 +2,14 @@
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
 
 use axum::Router;
 use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode, header};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -17,13 +18,16 @@ use tower::ServiceExt;
 use wormway_control::{Admin, AdminToken, Metrics, Store};
 use wormway_core::config::{Config, HealthCheckKind, Listener, Name, Protocol};
 use wormway_runtime::{
-    BoxError, BoxFuture, CertificateReport, Connection, HealthReport, PeriodReport, SeriesReport,
-    Server, Service, ServiceFactory, Services, Shutdown, StatsReport, TargetReport, TargetState,
-    TlsReport, TrafficReport, UpstreamReport,
+    AcmeCertificateReport, AcmeReport, BoxError, BoxFuture, CertificateReport, Connection,
+    HealthReport, PeriodReport, SeriesReport, Server, Service, ServiceFactory, Services, Shutdown,
+    StatsReport, TargetReport, TargetState, TlsReport, TrafficReport, UpstreamReport,
 };
 
 /// Token of the Admin API in these tests.
 const TOKEN: &str = "test-token";
+
+/// The SHA-256 of the API key `test`.
+const KEY_HASH: &str = "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
 
 /// Greets every connection with `hello` and closes it.
 struct Hello;
@@ -103,14 +107,67 @@ struct Tls;
 impl TlsReport for Tls {
     /// Returns the same certificates every time.
     fn certificates(&self) -> Vec<CertificateReport> {
-        let certificate = |name: &str, expiry| CertificateReport {
+        let certificate = |name: &str, host: &str, expiry| CertificateReport {
             name: name.parse().expect("name"),
+            names: vec![host.to_owned()],
+            issuer: "CN=Test CA".to_owned(),
+            not_before: UNIX_EPOCH + Duration::from_secs(1_761_696_000),
             not_after: UNIX_EPOCH + Duration::from_secs(expiry),
         };
         vec![
-            certificate("example", 1_793_000_000),
-            certificate("wildcard", 1_800_000_000),
+            certificate("example", "example.com", 1_793_000_000),
+            certificate("wildcard", "*.example.com", 1_800_000_000),
         ]
+    }
+}
+
+/// Reports ACME at fixed times: a certificate that keeps failing, one being ordered, and one
+/// that the configuration no longer gets through ACME. Notes the renewals asked for, and turns
+/// down those of `unmanaged`.
+#[derive(Clone, Default)]
+struct Acme {
+    /// Certificates whose renewal was asked for, in order.
+    renewals: Arc<Mutex<Vec<String>>>,
+}
+
+impl AcmeReport for Acme {
+    /// Returns the same certificates every time.
+    fn certificates(&self) -> Vec<AcmeCertificateReport> {
+        let at = |secs| Some(UNIX_EPOCH + Duration::from_secs(secs));
+        let report = |name: &str| AcmeCertificateReport {
+            name: name.parse().expect("name"),
+            renew_at: None,
+            retry_at: None,
+            ordering: false,
+            failures: 0,
+            last_error: None,
+        };
+        vec![
+            report("example"),
+            AcmeCertificateReport {
+                retry_at: at(1_761_699_600),
+                failures: 2,
+                last_error: Some("cannot reach the ACME directory".to_owned()),
+                ..report("pending")
+            },
+            AcmeCertificateReport {
+                renew_at: at(1_797_000_000),
+                ordering: true,
+                ..report("wildcard")
+            },
+        ]
+    }
+
+    /// Notes the renewal, unless the certificate is `unmanaged`.
+    fn renew(&self, name: &Name) -> bool {
+        if name.as_str() == "unmanaged" {
+            return false;
+        }
+        self.renewals
+            .lock()
+            .expect("renewals")
+            .push(name.to_string());
+        true
     }
 }
 
@@ -149,6 +206,8 @@ struct Harness {
     server: Arc<Server>,
     /// The database.
     store: Store,
+    /// Certificates whose renewal ACME was asked for.
+    renewals: Arc<Mutex<Vec<String>>>,
     /// Directory of the database, removed when the test ends.
     dir: TempDir,
 }
@@ -169,6 +228,8 @@ impl Harness {
         services.register(Protocol::Http, Hello);
         services.set_health_report(Report);
         services.set_tls_report(Tls);
+        let acme = Acme::default();
+        services.set_acme_report(acme.clone());
         services.set_stats_report(Traffic);
         let text = format!("version = 1\n[config]\nsource = \"{source}\"\n");
         let mut config = Config::from_toml(&text).expect("configuration");
@@ -187,6 +248,7 @@ impl Harness {
             router: admin.router(),
             server,
             store,
+            renewals: acme.renewals,
             dir,
         }
     }
@@ -286,6 +348,9 @@ async fn requires_the_token() {
         ("/api/v1/status", Some("Basic dGVzdA==")),
         ("/metrics", None),
         ("/api/v1/stats", None),
+        ("/api/v1/status/certificates", None),
+        ("/api/v1/routes", None),
+        ("/api/v1/routes/web", None),
     ] {
         let mut builder = Request::get(uri);
         if let Some(credential) = credential {
@@ -622,7 +687,8 @@ async fn records_the_client_of_a_change() {
     assert_eq!(body["error"]["code"], "invalid_request");
 }
 
-/// Validation checks settings without saving or applying them.
+/// Validation prepares settings like a change, so that addresses in use come up too, without
+/// saving or applying them.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn validates_without_applying() {
     let harness = Harness::start("db").await;
@@ -641,12 +707,22 @@ async fn validates_without_applying() {
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(body["error"]["details"][0]["path"], "listeners.web.listen");
 
+    let blocker = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let taken = blocker.local_addr().expect("address").to_string();
+    let busy = json!({ "config": listener("web", &taken) });
+    let (status, _, body) = harness
+        .call("POST", "/api/v1/config/validate", Some(busy), &[])
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error"]["code"], "apply_failed");
+
     assert!(harness.server.listeners().await.is_empty());
     let (_, body) = harness.get("/api/v1/config/versions").await;
     assert_eq!(body["versions"], json!([]));
 }
 
-/// In file mode the dynamic settings come from the file, so the API cannot change them.
+/// In file mode the dynamic settings come from the file, so the API cannot change them, not even
+/// one entity at a time; it can read them.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn is_read_only_in_file_mode() {
     let harness = Harness::start("file").await;
@@ -655,10 +731,20 @@ async fn is_read_only_in_file_mode() {
         .await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(body["error"]["code"], "read_only");
-    let (status, _, _) = harness
-        .call("POST", "/api/v1/config/versions/1/rollback", None, &[])
-        .await;
-    assert_eq!(status, StatusCode::CONFLICT);
+    let password = json!({ "password": "secret" });
+    for (method, uri, body) in [
+        ("POST", "/api/v1/config/versions/1/rollback", None),
+        ("PUT", "/api/v1/consumers/alice", Some(json!({}))),
+        ("DELETE", "/api/v1/consumers/alice", None),
+        ("PUT", "/api/v1/consumers/alice/password", Some(password)),
+        ("POST", "/api/v1/consumers/alice/api-keys", None),
+    ] {
+        let (status, _, _) = harness.call(method, uri, body, &[]).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{method} {uri}");
+    }
+    let (status, body) = harness.get("/api/v1/consumers").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({ "consumers": {} }));
     let (_, body) = harness.get("/api/v1/config").await;
     assert_eq!(body["source"], "file");
     assert_eq!(body["version"], Value::Null);
@@ -674,6 +760,10 @@ async fn answers_unknown_paths_and_methods() {
     let (status, _, body) = harness.call("DELETE", "/api/v1/config", None, &[]).await;
     assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
     assert_eq!(body["error"]["code"], "method_not_allowed");
+    for (method, uri) in [("POST", "/api/v1/routes"), ("PATCH", "/api/v1/routes/web")] {
+        let (status, _, _) = harness.call(method, uri, None, &[]).await;
+        assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{method} {uri}");
+    }
 }
 
 /// Saved versions survive a restart, and the newest one is applied again.
@@ -696,4 +786,370 @@ async fn keeps_versions_across_restarts() {
     let (_, body) = restarted.get("/api/v1/status").await;
     assert_eq!(body["config"]["version"], 1);
     assert_eq!(body["listeners"][0]["name"], "web");
+}
+
+/// The comments of the saved versions, newest first, each with the client that made the change.
+async fn changes(harness: &Harness) -> Vec<(String, String)> {
+    let (_, body) = harness.get("/api/v1/config/versions").await;
+    let text = |value: &Value| value.as_str().unwrap_or_default().to_owned();
+    body["versions"]
+        .as_array()
+        .expect("versions")
+        .iter()
+        .map(|version| (text(&version["comment"]), text(&version["source"])))
+        .collect()
+}
+
+/// Entities are created, read, replaced and deleted one at a time, each change saved as a
+/// version that says what changed. Sending an entity as it is changes nothing, and an entity
+/// that others refer to cannot be deleted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manages_entities_one_at_a_time() {
+    let harness = Harness::start("db").await;
+    let (status, body) = harness.get("/api/v1/upstreams").await;
+    assert_eq!((status, body), (StatusCode::OK, json!({ "upstreams": {} })));
+
+    let uri = "/api/v1/upstreams/app";
+    let app = json!({ "targets": ["127.0.0.1:9000"] });
+    let (status, headers, body) = harness.call("PUT", uri, Some(app.clone()), &[]).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body, json!({ "version": 1, "changed": true }));
+    let tag = headers[header::ETAG].clone();
+    let (status, headers, body) = harness.call("GET", uri, None, &[]).await;
+    assert_eq!((status, &body), (StatusCode::OK, &app));
+    assert_eq!(headers[header::ETAG], tag);
+    let (status, headers, body) = harness.call("PUT", uri, Some(app), &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({ "version": 1, "changed": false }));
+    assert_eq!(headers[header::ETAG], tag);
+
+    let web = json!({ "upstream": "app" });
+    let ui = [("wormway-client", "ui")];
+    let (status, _, body) = harness
+        .call("PUT", "/api/v1/routes/web", Some(web.clone()), &ui)
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let (_, body) = harness.get("/api/v1/routes").await;
+    assert_eq!(body, json!({ "routes": { "web": web } }));
+    let moved = json!({ "targets": ["127.0.0.1:9001"] });
+    let (status, headers, body) = harness.call("PUT", uri, Some(moved.clone()), &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({ "version": 3, "changed": true }));
+    assert_ne!(headers[header::ETAG], tag);
+    let (_, body) = harness.get("/api/v1/config").await;
+    assert_eq!(body["config"]["upstreams"]["app"], moved);
+
+    let (status, _, body) = harness.call("DELETE", uri, None, &[]).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let refers = json!([{ "path": "routes.web.upstream", "message": "unknown upstream \"app\"" }]);
+    assert_eq!(body["error"]["details"], refers);
+    let (status, _, body) = harness
+        .call("DELETE", "/api/v1/routes/web", None, &[])
+        .await;
+    assert_eq!(
+        (status, body),
+        (StatusCode::OK, json!({ "version": 4, "changed": true }))
+    );
+    let (status, _, _) = harness.call("DELETE", uri, None, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, body) = harness.call("DELETE", uri, None, &[]).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"]["message"], "upstreams.app not found");
+    let (status, _) = harness.get(uri).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let change = |comment: &str, source: &str| (comment.to_owned(), source.to_owned());
+    assert_eq!(
+        changes(&harness).await,
+        [
+            change("delete upstreams.app", "api"),
+            change("delete routes.web", "api"),
+            change("replace upstreams.app", "api"),
+            change("create routes.web", "ui"),
+            change("create upstreams.app", "api"),
+        ]
+    );
+}
+
+/// Every table of the dynamic settings has the endpoints, and entities come back as they were
+/// sent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn covers_every_table() {
+    let harness = Harness::start("db").await;
+    let entities = [
+        (
+            "listeners",
+            "web",
+            json!({ "listen": ["127.0.0.1:0"], "protocol": "http" }),
+        ),
+        ("upstreams", "app", json!({ "targets": ["127.0.0.1:9000"] })),
+        ("routes", "all", json!({ "upstream": "app" })),
+        (
+            "certificates",
+            "site",
+            json!({ "cert": "site.crt", "key": "site.key" }),
+        ),
+        ("consumers", "alice", json!({ "api_keys": [KEY_HASH] })),
+        (
+            "jwt",
+            "main",
+            json!({ "algorithm": "HS256", "secret": { "env": "JWT_SECRET" } }),
+        ),
+    ];
+    for (table, name, entity) in &entities {
+        let uri = format!("/api/v1/{table}/{name}");
+        let (status, _, body) = harness.call("PUT", &uri, Some(entity.clone()), &[]).await;
+        assert_eq!(status, StatusCode::CREATED, "{uri}: {body}");
+        let (status, body) = harness.get(&uri).await;
+        assert_eq!((status, &body), (StatusCode::OK, entity), "{uri}");
+        let (_, body) = harness.get(&format!("/api/v1/{table}")).await;
+        assert_eq!(body[table][name], *entity, "{table}");
+        assert_eq!(body.as_object().map(serde_json::Map::len), Some(1));
+    }
+    let (_, body) = harness.get("/api/v1/config").await;
+    for (table, name, entity) in &entities {
+        assert_eq!(body["config"][table][name], *entity, "{table}");
+    }
+}
+
+/// The entity tag of an entity changes with the entity only. `If-Match` lets a change through
+/// if the entity has one of the strong tags listed, or exists for `*`; `If-None-Match: *`
+/// creates an entity only if it does not exist yet.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn guards_entities_with_their_tags() {
+    let harness = Harness::start("db").await;
+    let uri = "/api/v1/consumers/alice";
+    let alice = json!({ "api_keys": [KEY_HASH] });
+    let create = [("if-none-match", "*")];
+    let (status, headers, _) = harness.call("PUT", uri, Some(json!({})), &create).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let first = headers[header::ETAG].to_str().expect("tag").to_owned();
+    assert_eq!(first.len(), 34, "{first}");
+    let (status, _, body) = harness.call("PUT", uri, Some(alice.clone()), &create).await;
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+    let exists = json!({ "code": "version_mismatch", "message": "consumers.alice already exists" });
+    assert_eq!(body["error"], exists);
+
+    let (status, _, _) = harness
+        .call("PUT", "/api/v1/consumers/bob", Some(json!({})), &[])
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (_, headers, _) = harness.call("GET", uri, None, &[]).await;
+    assert_eq!(headers[header::ETAG], first.as_str());
+
+    let stale = [("if-match", "\"00000000000000000000000000000000\"")];
+    let (status, _, body) = harness.call("PUT", uri, Some(alice.clone()), &stale).await;
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+    assert_eq!(body["error"]["message"], "consumers.alice has changed");
+    let listed = format!("\"0\", {first}");
+    let (status, headers, body) = harness
+        .call(
+            "PUT",
+            uri,
+            Some(alice.clone()),
+            &[("if-match", listed.as_str())],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let second = headers[header::ETAG].to_str().expect("tag").to_owned();
+    assert_ne!(second, first);
+
+    let weak = format!("W/{second}");
+    for tag in [weak.as_str(), first.as_str()] {
+        let (status, _, _) = harness
+            .call("DELETE", uri, None, &[("if-match", tag)])
+            .await;
+        assert_eq!(status, StatusCode::PRECONDITION_FAILED, "{tag}");
+    }
+    let unquoted = second.trim_matches('"');
+    let (status, _, _) = harness
+        .call("DELETE", uri, None, &[("if-match", unquoted)])
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, body) = harness
+        .call("PUT", uri, Some(alice), &[("if-match", "*")])
+        .await;
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+    assert_eq!(body["error"]["message"], "consumers.alice does not exist");
+}
+
+/// Entities in another shape and bad names are bad requests; entities that break the rules are
+/// refused with the path of each problem. Nothing is saved.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rejects_invalid_entities() {
+    let harness = Harness::start("db").await;
+    let app = json!({ "targets": ["127.0.0.1:9000"] });
+    let mut colourful = app.clone();
+    colourful["colour"] = json!("red");
+    for (uri, body) in [
+        ("/api/v1/upstreams/app", colourful),
+        ("/api/v1/upstreams/App", app),
+    ] {
+        let (status, _, body) = harness.call("PUT", uri, Some(body), &[]).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+        assert_eq!(body["error"]["code"], "invalid_request");
+    }
+    let nowhere = json!({ "upstream": "nowhere" });
+    let (status, _, body) = harness
+        .call("PUT", "/api/v1/routes/web", Some(nowhere), &[])
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let problems =
+        json!([{ "path": "routes.web.upstream", "message": "unknown upstream \"nowhere\"" }]);
+    assert_eq!(body["error"]["details"], problems);
+    assert!(changes(&harness).await.is_empty());
+}
+
+/// A password is kept as a bcrypt hash that checks it. An API key is made at random and shown
+/// once, and the consumer keeps its SHA-256. Both need the consumer to exist, and passwords
+/// must fit bcrypt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sets_passwords_and_makes_api_keys() {
+    let harness = Harness::start("db").await;
+    let uri = "/api/v1/consumers/alice";
+    harness.call("PUT", uri, Some(json!({})), &[]).await;
+    let password = |text: &str| Some(json!({ "password": text }));
+    let (status, headers, body) = harness
+        .call(
+            "PUT",
+            &format!("{uri}/password"),
+            password("s3cret:pass"),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, json!({ "version": 2, "changed": true }));
+    let (_, now, alice) = harness.call("GET", uri, None, &[]).await;
+    assert_eq!(headers[header::ETAG], now[header::ETAG]);
+    let hash = alice["password_hash"].as_str().expect("password hash");
+    assert!(hash.starts_with("$2b$10$"), "{hash}");
+    assert!(bcrypt::verify("s3cret:pass", hash).expect("bcrypt"));
+
+    // 72 bytes, and 74, though fewer characters.
+    let (longest, long) = ("é".repeat(36), "é".repeat(37));
+    for (uri, body, status) in [
+        ("alice/password", password(""), StatusCode::BAD_REQUEST),
+        ("alice/password", password(&long), StatusCode::BAD_REQUEST),
+        (
+            "alice/password",
+            Some(json!({ "pass": "x" })),
+            StatusCode::BAD_REQUEST,
+        ),
+        ("bob/password", password("x"), StatusCode::NOT_FOUND),
+        ("alice/password", password(&longest), StatusCode::OK),
+    ] {
+        let uri = format!("/api/v1/consumers/{uri}");
+        let (answer, _, body) = harness.call("PUT", &uri, body, &[]).await;
+        assert_eq!(answer, status, "{uri}: {body}");
+    }
+
+    let mut keys = Vec::new();
+    for version in [4, 5] {
+        let (status, headers, body) = harness
+            .call("POST", &format!("{uri}/api-keys"), None, &[])
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(
+            (&body["version"], &body["changed"]),
+            (&json!(version), &json!(true))
+        );
+        let key = body["key"].as_str().expect("key").to_owned();
+        assert!(
+            key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit()),
+            "{key}"
+        );
+        let digest: String = Sha256::digest(&key)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        assert_eq!(body["hash"], format!("sha256:{digest}"));
+        keys.push(body["hash"].clone());
+        let (_, now, _) = harness.call("GET", uri, None, &[]).await;
+        assert_eq!(headers[header::ETAG], now[header::ETAG]);
+    }
+    assert_ne!(keys[0], keys[1]);
+    let (_, alice) = harness.get(uri).await;
+    assert_eq!(alice["api_keys"], json!(keys));
+    let (status, _, _) = harness
+        .call("POST", "/api/v1/consumers/bob/api-keys", None, &[])
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let change = |comment: &str| (comment.to_owned(), "api".to_owned());
+    assert_eq!(
+        changes(&harness).await,
+        [
+            change("add an API key to consumers.alice"),
+            change("add an API key to consumers.alice"),
+            change("set the password of consumers.alice"),
+            change("set the password of consumers.alice"),
+            change("create consumers.alice"),
+        ]
+    );
+}
+
+/// The certificates of the configuration come with the one presented and with how ACME is
+/// doing with them; a certificate from files has no ACME state, even one that ACME still
+/// reports. Renewals go to ACME, for the certificates that come through it only.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reports_certificates_and_renews_them() {
+    let harness = Harness::start("db").await;
+    let acme = |domain: &str| json!({ "acme": { "domains": [domain] } });
+    let config = json!({ "certificates": {
+        "example": { "cert": "example.crt", "key": "example.key" },
+        "pending": acme("pending.example.com"),
+        "unmanaged": acme("unmanaged.example.com"),
+        "wildcard": acme("www.example.com"),
+    }});
+    let (status, body) = harness.put_config(config, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, body) = harness.get("/api/v1/status/certificates").await;
+    assert_eq!(status, StatusCode::OK);
+    let current = |host: &str, until: &str| {
+        json!({
+            "names": [host], "issuer": "CN=Test CA",
+            "not_before": "2025-10-29T00:00:00.000Z", "not_after": until,
+        })
+    };
+    let expected = json!({ "certificates": [
+        {
+            "name": "example", "source": "files",
+            "current": current("example.com", "2026-10-26T07:33:20.000Z"), "acme": null,
+        },
+        {
+            "name": "pending", "source": "acme", "current": null,
+            "acme": {
+                "renew_at": null, "retry_at": "2025-10-29T01:00:00.000Z", "ordering": false,
+                "failures": 2, "last_error": "cannot reach the ACME directory",
+            },
+        },
+        { "name": "unmanaged", "source": "acme", "current": null, "acme": null },
+        {
+            "name": "wildcard", "source": "acme",
+            "current": current("*.example.com", "2027-01-15T08:00:00.000Z"),
+            "acme": {
+                "renew_at": "2026-12-11T14:40:00.000Z", "retry_at": null, "ordering": true,
+                "failures": 0, "last_error": null,
+            },
+        },
+    ]});
+    assert_eq!(body, expected);
+
+    let renew = |name: &str| format!("/api/v1/certificates/{name}/renew");
+    let (status, _, body) = harness.call("POST", &renew("pending"), None, &[]).await;
+    assert_eq!(
+        (status, body),
+        (StatusCode::ACCEPTED, json!({ "requested": true }))
+    );
+    for (name, status, code) in [
+        ("example", StatusCode::CONFLICT, "not_acme"),
+        ("unmanaged", StatusCode::CONFLICT, "not_acme"),
+        ("missing", StatusCode::NOT_FOUND, "not_found"),
+    ] {
+        let (answer, _, body) = harness.call("POST", &renew(name), None, &[]).await;
+        assert_eq!(answer, status, "{name}: {body}");
+        assert_eq!(body["error"]["code"], code, "{name}");
+    }
+    assert_eq!(*harness.renewals.lock().expect("renewals"), ["pending"]);
 }

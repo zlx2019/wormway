@@ -140,6 +140,13 @@ impl TryFrom<String> for ApiKeyHash {
     }
 }
 
+impl From<[u8; 32]> for ApiKeyHash {
+    /// Takes the SHA-256 of a key.
+    fn from(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+}
+
 impl fmt::Display for ApiKeyHash {
     /// Writes `sha256:` and the hash in lowercase hex.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -425,6 +432,10 @@ mod tests {
         .unwrap();
         assert_eq!(consumer.password_hash.as_ref().unwrap().as_str(), HASH);
         assert_eq!(consumer.api_keys[0].bytes()[..3], [0x9f, 0x86, 0xd0]);
+        assert_eq!(
+            ApiKeyHash::from(*consumer.api_keys[0].bytes()).to_string(),
+            KEY
+        );
         let json = serde_json::to_string(&consumer).unwrap();
         assert_eq!(
             json,

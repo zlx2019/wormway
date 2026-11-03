@@ -469,6 +469,43 @@ async fn engines_can_reject_changes() {
     );
 }
 
+/// A dry run prepares the engines and binds new addresses like a change, reports the problems
+/// of both, and changes nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dry_runs_change_nothing() {
+    let recorder = Recorder::default();
+    let server = start_recorded(WEB, &recorder).await;
+    let web = addr(&server, "web").await;
+    server
+        .dry_run(parse(&format!("{WEB}{API}")))
+        .await
+        .expect("dry run");
+    assert_eq!(server.snapshot().version, 1);
+    assert_eq!(server.listeners().await.len(), 1);
+    assert_eq!(addr(&server, "web").await, web);
+    assert_eq!(
+        recorder.lines(),
+        ["prepare web", "commit web", "prepare api,web"]
+    );
+
+    let refused = "[listeners.refused]\nlisten = [\"127.0.0.1:0\"]\nprotocol = \"http\"\n";
+    let error = server.dry_run(parse(&format!("{WEB}{refused}"))).await;
+    assert!(
+        matches!(&error, Err(ApplyError::Config(ConfigError::Invalid(issues))) if issues[0].path == "listeners.refused"),
+        "{error:?}"
+    );
+    let blocker = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let taken = blocker.local_addr().expect("local address");
+    let api = format!("[listeners.api]\nlisten = [\"{taken}\"]\nprotocol = \"http\"\n");
+    let error = server.dry_run(parse(&format!("{WEB}{api}"))).await;
+    assert!(
+        matches!(&error, Err(ApplyError::Bind { addr, .. }) if *addr == taken),
+        "{error:?}"
+    );
+    assert_eq!(server.snapshot().version, 1);
+    assert_eq!(recorder.lines().len(), 4);
+}
+
 /// Applying the configuration in effect again prepares the engines again and leaves unchanged
 /// listeners alone. A change committed while it waits is what it applies, not the older one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

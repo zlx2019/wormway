@@ -21,7 +21,7 @@ use crate::snapshot::Snapshot;
 use crate::socket::{self, Bound, Socket};
 use crate::stats::TrafficReport;
 use crate::telemetry;
-use crate::tls::CertificateReport;
+use crate::tls::{AcmeCertificateReport, CertificateReport};
 
 /// Runs the listeners of a configuration and switches to new configurations without dropping
 /// connections.
@@ -94,7 +94,7 @@ impl Server {
 
     /// Checks that `config` could be applied: its validation rules hold and every protocol it
     /// uses is available. Engines are not prepared and addresses are not bound, so both can
-    /// still fail later.
+    /// still fail later; [`Server::dry_run`] checks them too.
     pub fn validate(&self, config: &Config) -> Result<(), ApplyError> {
         config.validate().map_err(ConfigError::Invalid)?;
         for (name, listener) in &config.listeners {
@@ -113,6 +113,14 @@ impl Server {
             telemetry::config_applied(false);
         }
         prepared
+    }
+
+    /// Prepares the switch to `config` like [`Server::prepare`] and discards it, so that
+    /// everything a change could run into comes up: broken rules, problems of the engines such
+    /// as unreadable files, and addresses that cannot be bound. Nothing running changes, and it
+    /// does not count as a change in the metrics. Other changes wait until it is done.
+    pub async fn dry_run(&self, config: Config) -> Result<(), ApplyError> {
+        self.try_prepare(config).await.map(drop)
     }
 
     /// Switches to `config` and returns its snapshot: [`Server::prepare`], then
@@ -178,6 +186,22 @@ impl Server {
             .tls_report()
             .map(|report| report.certificates())
             .unwrap_or_default()
+    }
+
+    /// Returns how ACME is doing with each certificate it manages; none without ACME.
+    pub fn acme_certificates(&self) -> Vec<AcmeCertificateReport> {
+        self.services
+            .acme_report()
+            .map(|report| report.certificates())
+            .unwrap_or_default()
+    }
+
+    /// Asks ACME to order certificate `name` again as soon as possible. Returns `false` without
+    /// ACME, or if the configuration in effect does not get `name` through it.
+    pub fn renew_certificate(&self, name: &Name) -> bool {
+        self.services
+            .acme_report()
+            .is_some_and(|report| report.renew(name))
     }
 
     /// Returns the traffic of the last minute, if a service counts it.

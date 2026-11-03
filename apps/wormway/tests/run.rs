@@ -67,6 +67,12 @@ fn write_certificate(dir: &Path, file: &str) {
 /// Sends `GET path` with an optional token to the Admin API at `addr`, and returns the status
 /// code and the body.
 fn get(addr: &str, path: &str, token: Option<&str>) -> (u16, String) {
+    request(addr, "GET", path, token, "")
+}
+
+/// Sends `method path` with an optional token and `body`, JSON unless empty, to the Admin API at
+/// `addr`, and returns the status code and the body of the answer.
+fn request(addr: &str, method: &str, path: &str, token: Option<&str>, body: &str) -> (u16, String) {
     let mut stream = TcpStream::connect(addr).expect("connect to the Admin API");
     stream
         .set_read_timeout(Some(PATIENCE))
@@ -74,9 +80,15 @@ fn get(addr: &str, path: &str, token: Option<&str>) -> (u16, String) {
     let authorization = token
         .map(|token| format!("Authorization: Bearer {token}\r\n"))
         .unwrap_or_default();
+    let json = if body.is_empty() {
+        ""
+    } else {
+        "Content-Type: application/json\r\n"
+    };
+    let length = body.len();
     write!(
         stream,
-        "GET {path} HTTP/1.1\r\nHost: wormway\r\n{authorization}Connection: close\r\n\r\n"
+        "{method} {path} HTTP/1.1\r\nHost: wormway\r\n{authorization}{json}Content-Length: {length}\r\nConnection: close\r\n\r\n{body}"
     )
     .expect("send the request");
     let mut response = String::new();
@@ -201,9 +213,14 @@ impl Wormway {
             .expect("address in the log line")
     }
 
-    /// Waits until the Admin API listens and returns its address.
+    /// Waits until the Admin API listens and returns its address, also when a wait for another
+    /// line passed it already.
     fn admin_addr(&mut self) -> String {
-        let line = self.wait_for("Admin API listening");
+        let listening = "Admin API listening";
+        let line = match self.seen.iter().find(|line| line.contains(listening)) {
+            Some(line) => line.clone(),
+            None => self.wait_for(listening),
+        };
         line.split_once("addr=")
             .map(|(_, addr)| addr.trim().to_owned())
             .expect("address in the log line")
@@ -384,6 +401,23 @@ fn serves_the_admin_api() {
     let (status, body) = get(&addr, "/metrics", Some(token.trim()));
     assert_eq!(status, 200);
     assert!(body.contains("wormway_build_info"), "{body}");
+
+    // Validation binds new addresses as a change would, but does not count as one.
+    let taken = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let busy = format!(
+        r#"{{"config":{{"listeners":{{"web":{{"listen":["{}"],"protocol":"http"}}}}}}}}"#,
+        taken.local_addr().expect("address")
+    );
+    let validate = "/api/v1/config/validate";
+    let (status, body) = request(&addr, "POST", validate, Some(token.trim()), &busy);
+    assert_eq!(status, 422, "{body}");
+    assert!(body.contains(r#""code":"apply_failed""#), "{body}");
+    let (_, body) = get(&addr, "/metrics", Some(token.trim()));
+    assert!(
+        body.contains(r#"wormway_config_applies_total{result="ok"} 1"#),
+        "{body}"
+    );
+    assert!(!body.contains(r#"result="error""#), "{body}");
 
     use std::os::unix::fs::PermissionsExt;
     let mode = std::fs::metadata(&token_file)
@@ -626,7 +660,8 @@ key = "site.key"
 /// A certificate that the configuration gets through ACME is ordered as Wormway starts. When
 /// the certificate authority cannot be reached, the attempt fails with the reason and waits an
 /// hour before the next one, also across reloads; without a listener on port 80, HTTP-01 is
-/// pointed out.
+/// pointed out. The Admin API tells how the order went, and a renewal asked for through it
+/// orders again at once.
 #[test]
 fn orders_acme_certificates() {
     let directory = format!("https://{}/directory", closed_port());
@@ -634,7 +669,8 @@ fn orders_acme_certificates() {
         "{EMPTY}[acme]\ndirectory = \"{directory}\"\n[certificates.site]\nacme = {{ domains = [\"site.test\"] }}\n"
     );
     let path = temp_config("run-acme", &config);
-    let mut wormway = Wormway::start(&path);
+    let token = "acme-token";
+    let mut wormway = Wormway::start_with_env(&path, &[("WORMWAY_ADMIN_TOKEN", token)]);
     // ACME runs next to the rest of the start, so its lines come in any order with the others.
     let failed = wormway.wait_for("cannot get the certificate through ACME");
     assert!(failed.contains("trying again in 1h"), "{failed}");
@@ -662,6 +698,24 @@ fn orders_acme_certificates() {
         .filter(|line| line.contains("ordering a certificate through ACME"))
         .count();
     assert_eq!(orders, 1, "{lines:#?}");
+
+    let admin = wormway.admin_addr();
+    let (status, body) = get(&admin, "/api/v1/status/certificates", Some(token));
+    assert_eq!(status, 200, "{body}");
+    for part in [
+        r#""name":"site","source":"acme","current":null"#,
+        r#""ordering":false,"failures":1"#,
+        &reason,
+    ] {
+        assert!(body.contains(part), "{part} not in {body}");
+    }
+    let renew = "/api/v1/certificates/site/renew";
+    let (status, body) = request(&admin, "POST", renew, Some(token), "");
+    assert_eq!(status, 202, "{body}");
+    wormway.wait_for("renewal asked for certificate=site");
+    wormway.wait_for("ordering a certificate through ACME certificate=site");
+    let failed = wormway.wait_for("cannot get the certificate through ACME");
+    assert!(failed.contains("trying again in 2h"), "{failed}");
     wormway.signal("TERM");
     assert_eq!(wormway.exit_code(), Some(0));
 }

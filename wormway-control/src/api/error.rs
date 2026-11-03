@@ -49,6 +49,17 @@ impl ApiError {
         }
     }
 
+    /// Something failed that the client cannot fix: logs `error` with its causes and answers
+    /// with a generic message.
+    pub(crate) fn internal(error: &dyn Error) -> Self {
+        error!("Admin API request failed: {}", with_causes(error));
+        Self::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            "internal error, see the server log",
+        )
+    }
+
     /// The thing described by `what` does not exist.
     pub(crate) fn not_found(what: impl Into<String>) -> Self {
         Self::new(
@@ -126,12 +137,7 @@ impl From<ApplyError> for ApiError {
 impl From<StoreError> for ApiError {
     /// Logs the cause and answers with a generic message.
     fn from(error: StoreError) -> Self {
-        error!("Admin API request failed: {}", with_causes(&error));
-        Self::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "internal",
-            "internal error, see the server log",
-        )
+        Self::internal(&error)
     }
 }
 

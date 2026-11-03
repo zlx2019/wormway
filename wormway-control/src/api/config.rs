@@ -96,7 +96,9 @@ pub(crate) async fn show(State(admin): State<Arc<Admin>>) -> Response {
     response
 }
 
-/// `POST /api/v1/config/validate`: checks dynamic settings without applying them.
+/// `POST /api/v1/config/validate`: prepares dynamic settings like a change and discards them,
+/// so that every problem a change would run into comes up, such as unreadable files or
+/// addresses in use.
 pub(crate) async fn validate(
     State(admin): State<Arc<Admin>>,
     body: Result<Json<ConfigRequest>, JsonRejection>,
@@ -104,7 +106,7 @@ pub(crate) async fn validate(
     let Json(request) = body?;
     let mut config = admin.server.snapshot().config.clone();
     config.set_dynamic(request.config);
-    admin.server.validate(&config)?;
+    admin.server.dry_run(config).await?;
     Ok(Json(serde_json::json!({ "valid": true })))
 }
 
@@ -183,7 +185,7 @@ pub(crate) async fn rollback(
 ///
 /// The switch is prepared first, so the version is only saved if it can be applied, and only
 /// applied once it is saved. `current` is the guarded saved version in effect.
-async fn change(
+pub(super) async fn change(
     admin: &Admin,
     current: &mut Option<i64>,
     config: DynamicConfig,
@@ -215,7 +217,7 @@ async fn change(
 }
 
 /// Returns who makes a change, from the `Wormway-Client` header.
-fn change_source(headers: &HeaderMap) -> Result<ChangeSource, ApiError> {
+pub(super) fn change_source(headers: &HeaderMap) -> Result<ChangeSource, ApiError> {
     let Some(value) = headers.get(CLIENT_HEADER) else {
         return Ok(ChangeSource::Api);
     };
