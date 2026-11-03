@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use axum::http::{HeaderMap, StatusCode};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
 use tokio::time::Instant;
 use wormway_runtime::{Server, TargetState};
@@ -219,6 +219,32 @@ async fn truncating_upstream() -> (SocketAddr, Arc<AtomicUsize>) {
         }
     });
     (addr, requests)
+}
+
+/// Starts an upstream that answers each request with `101 Switching Protocols`, then sends
+/// nothing more and holds the connection for [`LIMIT`].
+async fn upgrading_upstream() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local address");
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut head = Vec::new();
+                let mut byte = [0; 1];
+                while !head.ends_with(b"\r\n\r\n") {
+                    match stream.read(&mut byte).await {
+                        Ok(1) => head.push(byte[0]),
+                        _ => return,
+                    }
+                }
+                let response = b"HTTP/1.1 101 Switching Protocols\r\n\
+                    Connection: Upgrade\r\nUpgrade: websocket\r\n\r\n";
+                let _ = stream.write_all(response).await;
+                tokio::time::sleep(LIMIT).await;
+            });
+        }
+    });
+    addr
 }
 
 /// Sends `GET path` to `web` and reads the response, whatever happens.
@@ -481,4 +507,35 @@ async fn ignores_failures_after_the_response_header() {
         fetch(web, "/").await;
     }
     assert_eq!(requests.load(Ordering::SeqCst), 3);
+}
+
+/// Failures of an upgraded connection, such as idling past the read timeout, do not count for
+/// the passive checks either: `101 Switching Protocols` answered the request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ignores_failures_of_upgraded_connections() {
+    let target = upgrading_upstream().await;
+    let server = start(&format!(
+        r#"
+        [routes.app]
+        upstream = "app"
+        timeouts = {{ read = "100ms" }}
+        [upstreams.app]
+        targets = ["{target}"]
+        passive = {{ max_fails = 1, fail_timeout = "1h" }}
+        "#
+    ))
+    .await;
+    let web = addr(&server, "web").await;
+    let mut client = TcpStream::connect(web).await.expect("connect");
+    let request =
+        b"GET / HTTP/1.1\r\nHost: app\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n";
+    client.write_all(request).await.expect("send");
+    let mut answer = Vec::new();
+    tokio::time::timeout(LIMIT, client.read_to_end(&mut answer))
+        .await
+        .expect("closed in time")
+        .expect("read");
+    let answer = String::from_utf8_lossy(&answer);
+    assert!(answer.starts_with("HTTP/1.1 101 "), "{answer}");
+    assert_eq!(server.upstreams()[0].targets[0].state, TargetState::Healthy);
 }

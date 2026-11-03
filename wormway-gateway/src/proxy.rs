@@ -9,7 +9,7 @@ use std::time::{Duration, Instant, SystemTime};
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use bytes::Bytes;
-use http::{HeaderValue, Version};
+use http::{HeaderValue, StatusCode, Version};
 use pingora::http::{HMap, Method, RequestHeader, ResponseHeader};
 use pingora::lb::Backend;
 use pingora::proxy::{FailToProxy, ProxyHttp, ProxyWarnLogContext, Session};
@@ -380,14 +380,16 @@ impl ProxyHttp for Proxy {
     }
 
     /// Notes that the target answered, for the passive health checks as well, unless with an
-    /// interim response.
+    /// interim response. `101 Switching Protocols` is the last response of an upgraded
+    /// connection, not an interim one.
     async fn upstream_response_filter(
         &self,
         _session: &mut Session,
         upstream_response: &mut ResponseHeader,
         ctx: &mut RequestContext,
     ) -> pingora::Result<()> {
-        if !upstream_response.status.is_informational() {
+        let status = upstream_response.status;
+        if !status.is_informational() || status == StatusCode::SWITCHING_PROTOCOLS {
             ctx.answered = true;
             ctx.upstream_duration = ctx.upstream_started.map(|started| started.elapsed());
             if let (Some(route), Some(target), Some(sent)) =
