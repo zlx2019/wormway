@@ -219,7 +219,8 @@ pub enum HealthCheckKind {
 /// Passive health checks, as in Nginx: a target whose requests fail `max_fails` times within
 /// `fail_timeout` gets no requests for `fail_timeout`. Failing means that the connection, its
 /// TLS, sending the request or waiting for the response header failed or ran out of time; a
-/// response passes whatever its status.
+/// response passes whatever its status. When no other target is left, a target that is out
+/// gets requests anyway, and is back once it answers one.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]

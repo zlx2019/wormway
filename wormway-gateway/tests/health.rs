@@ -13,8 +13,9 @@ use std::time::Duration;
 use axum::http::{HeaderMap, StatusCode};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use tokio::sync::Notify;
 use tokio::time::Instant;
-use wormway_runtime::Server;
+use wormway_runtime::{Server, TargetState};
 
 use crate::common::{addr, parse, serve, upstream};
 
@@ -401,6 +402,61 @@ async fn takes_failing_targets_out_for_a_while() {
         assert_eq!(get(web, "/alone").await.0, 502);
     }
     assert_eq!(failures.load(Ordering::SeqCst), 5);
+}
+
+/// A target that is out is back once it answers a request that went to it because no other
+/// target was left, long before its fail timeout; an answer to a request sent before it was
+/// taken out does not bring it back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn brings_targets_back_once_they_answer() {
+    let (arrived, release) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+    let held = {
+        let (arrived, release) = (arrived.clone(), release.clone());
+        move || async move {
+            arrived.notify_one();
+            release.notified().await;
+            "held"
+        }
+    };
+    let target = serve(
+        axum::Router::new()
+            .route("/held", axum::routing::get(held))
+            .route(
+                "/hang",
+                axum::routing::get(|| async {
+                    tokio::time::sleep(LIMIT).await;
+                    "late"
+                }),
+            )
+            .fallback(|| async { "back" }),
+    )
+    .await;
+    let server = start(&format!(
+        r#"
+        [routes.hang]
+        match = {{ paths = ["/hang"] }}
+        upstream = "app"
+        timeouts = {{ read = "100ms" }}
+        [routes.app]
+        upstream = "app"
+        [upstreams.app]
+        targets = ["{target}"]
+        passive = {{ max_fails = 1, fail_timeout = "1h" }}
+        "#
+    ))
+    .await;
+    let web = addr(&server, "web").await;
+    let state = || server.upstreams()[0].targets[0].state;
+    let early = tokio::spawn(get(web, "/held"));
+    arrived.notified().await;
+    assert_eq!(get(web, "/hang").await.0, 504);
+    release.notify_one();
+    assert_eq!(early.await.expect("request"), (200, "held".to_owned()));
+    let out = state();
+    assert!(matches!(out, TargetState::Ejected { .. }), "{out:?}");
+
+    assert_eq!(get(web, "/").await, (200, "back".to_owned()));
+    assert_eq!(state(), TargetState::Healthy);
 }
 
 /// Failures after the response header do not count for the passive checks: the target

@@ -7,7 +7,8 @@ import { daysUntil, formatTime } from "@/lib/format"
 /** Days before the end of its validity from which a certificate is shown as expiring. */
 export const EXPIRING_DAYS = 14
 
-/** Whether a target gets no requests now. */
+/** Whether a target is unhealthy or taken out; one taken out still gets requests when no
+ * other target of its upstream is left. */
 export function isDown(target: TargetHealth): boolean {
   return target.state !== "healthy"
 }

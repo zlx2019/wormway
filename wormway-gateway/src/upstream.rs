@@ -284,6 +284,14 @@ impl UpstreamRuntime {
         }
     }
 
+    /// Counts a request to `target`, sent at `sent`, that got its response header, for the
+    /// passive checks.
+    pub(crate) fn passed(&self, target: &Backend, sent: Instant) {
+        if let Some(health) = self.health() {
+            health.passed(target, sent, Instant::now());
+        }
+    }
+
     /// Picks a target that `accept` takes: one that the load balancer offers, or else the first
     /// of all the targets. The load balancer offers a few targets only, which may all be
     /// refused when most targets are not usable.

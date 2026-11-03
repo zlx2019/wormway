@@ -754,7 +754,7 @@
     },
     "PassiveCheck": {
       "additionalProperties": false,
-      "description": "Passive health checks, as in Nginx: a target whose requests fail `max_fails` times within\n`fail_timeout` gets no requests for `fail_timeout`. Failing means that the connection, its\nTLS, sending the request or waiting for the response header failed or ran out of time; a\nresponse passes whatever its status.",
+      "description": "Passive health checks, as in Nginx: a target whose requests fail `max_fails` times within\n`fail_timeout` gets no requests for `fail_timeout`. Failing means that the connection, its\nTLS, sending the request or waiting for the response header failed or ran out of time; a\nresponse passes whatever its status. When no other target is left, a target that is out\ngets requests anyway, and is back once it answers one.",
       "properties": {
         "fail_timeout": {
           "description": "Time in which the failures count, and for which the target is out. Default: `\"10s\"`.",

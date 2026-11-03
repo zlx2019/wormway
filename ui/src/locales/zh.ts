@@ -60,7 +60,7 @@ export const zh: Messages = {
     quiet: "最近一分钟没有请求的：{{count}} 个",
     lastMinute: "最近一分钟",
     sparkline: "{{name}} 最近一分钟的请求",
-    targetsDown: "不分配请求的上游目标：{{count}} 个",
+    targetsDown: "已摘除或不健康的上游目标：{{count}} 个",
     certificatesTroubled:
       "需要关注的证书（未签发、即将到期或续期失败）：{{count}} 张",
   },

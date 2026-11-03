@@ -226,6 +226,7 @@ impl UpstreamHealth {
         let reason = probe::describe(error);
         let since = SystemTime::now();
         record.out = Some(Ejection {
+            began: now,
             since,
             until: since + window,
             reason: reason.clone(),
@@ -247,6 +248,36 @@ impl UpstreamHealth {
             passive.fail_timeout(),
             passive.fail_timeout(),
         );
+    }
+
+    /// Counts a request to `target`, sent at `sent`, that got its response header at `now`.
+    /// A target that the passive checks had taken out before the request was sent gets
+    /// requests again, since it answers; a request sent earlier says nothing about how the
+    /// target is now.
+    pub(crate) fn passed(&self, target: &Backend, sent: Instant, now: Instant) {
+        if self.passive.is_none() {
+            return;
+        }
+        let targets = self.targets.load();
+        let Some(health) = targets.get(&target.addr) else {
+            return;
+        };
+        let clock = self.clock(now);
+        if health.out_until.load(Ordering::Relaxed) <= clock {
+            return;
+        }
+        // Under the lock, so that a target taken out again meanwhile stays out.
+        let record = health.lock();
+        if !record.out.as_ref().is_some_and(|out| out.began < sent) {
+            return;
+        }
+        health.out_until.store(clock, Ordering::Relaxed);
+        drop(record);
+        let host = target
+            .ext
+            .get::<TargetHost>()
+            .map(|TargetHost(host)| &**host);
+        info!(upstream = %self.name, target = %target.addr, host, "target answered while taken out, so it gets requests again");
     }
 
     /// Returns the health of the target at `addr`, if the health follows it.
@@ -389,9 +420,11 @@ struct TargetRecord {
 
 /// A time the passive checks took a target out.
 struct Ejection {
+    /// When they took it out, to tell the requests sent after.
+    began: Instant,
     /// When they took it out.
     since: SystemTime,
-    /// When it gets requests again.
+    /// When it gets requests again at the latest.
     until: SystemTime,
     /// The failure that took it out.
     reason: String,
@@ -566,6 +599,34 @@ mod tests {
         assert!(health.usable(&first.addr, now + Duration::from_secs(12)));
         assert!(health.usable(&second.addr, now + Duration::from_secs(1)));
         assert!(health.up(&first.addr));
+    }
+
+    /// A target that is out is back once it answers a request sent after it was taken out; an
+    /// answer to one sent before, even at the same time, does not bring it back.
+    #[tokio::test]
+    async fn brings_targets_back_once_they_answer() {
+        let passive = PassiveCheck {
+            max_fails: Some(1),
+            fail_timeout: Some(wormway_core::config::Duration::from_secs(10)),
+        };
+        let health = health(&settings(None, Some(passive)));
+        let watch = health.watch();
+        let one = targets(&["10.0.0.1:80"]);
+        assert!(watch.update(&one).is_empty());
+        let target = one.first().unwrap();
+        let error = pingora::Error::new(pingora::ErrorType::ConnectRefused);
+        let start = Instant::now();
+        let at = |seconds| start + Duration::from_secs(seconds);
+        health.failed(target, &error, at(1));
+        health.passed(target, at(0), at(2));
+        health.passed(target, at(1), at(2));
+        assert!(!health.usable(&target.addr, at(2)));
+
+        health.passed(target, at(2), at(3));
+        assert!(health.usable(&target.addr, at(3)));
+        assert_eq!(health.report(&target.addr, at(3)).0, TargetState::Healthy);
+        health.failed(target, &error, at(4));
+        assert!(!health.usable(&target.addr, at(4)));
     }
 
     /// The report says whether each target gets requests, since when and why not: the active

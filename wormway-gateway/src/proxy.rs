@@ -55,6 +55,8 @@ pub(crate) struct RequestContext {
     started: Instant,
     /// When the first target was picked.
     upstream_started: Option<Instant>,
+    /// When the attempt at the current target started, for the passive health checks.
+    attempt_started: Option<Instant>,
     /// From picking the first target to the response header of the last one.
     upstream_duration: Option<Duration>,
     /// Routes and upstreams when the request started, kept until it ends.
@@ -135,6 +137,7 @@ impl ProxyHttp for Proxy {
         RequestContext {
             started: Instant::now(),
             upstream_started: None,
+            attempt_started: None,
             upstream_duration: None,
             snapshot: self.snapshot.load_full(),
             route: None,
@@ -268,6 +271,7 @@ impl ProxyHttp for Proxy {
         ctx.answered = false;
         ctx.counted = false;
         ctx.upstream_started.get_or_insert_with(Instant::now);
+        ctx.attempt_started = Some(Instant::now());
         let peer = upstream.peer(&target, &route.timeouts);
         ctx.tried.push(target);
         Ok(Box::new(peer))
@@ -375,7 +379,8 @@ impl ProxyHttp for Proxy {
         }
     }
 
-    /// Notes that the target answered, unless with an interim response.
+    /// Notes that the target answered, for the passive health checks as well, unless with an
+    /// interim response.
     async fn upstream_response_filter(
         &self,
         _session: &mut Session,
@@ -385,6 +390,12 @@ impl ProxyHttp for Proxy {
         if !upstream_response.status.is_informational() {
             ctx.answered = true;
             ctx.upstream_duration = ctx.upstream_started.map(|started| started.elapsed());
+            if let (Some(route), Some(target), Some(sent)) =
+                (&ctx.route, ctx.tried.last(), ctx.attempt_started)
+                && let Some(upstream) = route.upstream()
+            {
+                upstream.runtime.passed(target, sent);
+            }
         }
         Ok(())
     }

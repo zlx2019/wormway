@@ -58,7 +58,7 @@ export const en = {
     quiet: "Without requests in the last minute: {{count}}",
     lastMinute: "Last minute",
     sparkline: "Requests of {{name}} in the last minute",
-    targetsDown: "Upstream targets that get no requests: {{count}}",
+    targetsDown: "Upstream targets that are unhealthy or taken out: {{count}}",
     certificatesTroubled:
       "Certificates to look at, missing, expiring or failing to renew: {{count}}",
   },

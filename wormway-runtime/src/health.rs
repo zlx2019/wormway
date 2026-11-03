@@ -50,9 +50,10 @@ pub enum TargetState {
     /// The active checks failed: it gets no requests until its probes pass again.
     Unhealthy,
     /// The passive checks took it out: it gets no requests until `until`, unless every other
-    /// target of its upstream is out as well.
+    /// target of its upstream is out as well. Then it gets them anyway, and is back once it
+    /// answers one.
     Ejected {
-        /// When it gets requests again.
+        /// When it gets requests again at the latest.
         until: SystemTime,
     },
 }
