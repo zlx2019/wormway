@@ -5,12 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use bytes::Bytes;
-use hyper_util::client::legacy::Client;
-use hyper_util::rt::TokioExecutor;
 use instant_acme::{
-    Account, AccountBuilder, AccountCredentials, BodyWrapper, CertificateIdentifier, Error,
-    NewAccount,
+    Account, AccountBuilder, AccountCredentials, CertificateIdentifier, Error, NewAccount,
 };
 use tokio::sync::watch;
 use tracing::{info, warn};
@@ -285,8 +281,7 @@ fn account_builder(shared: &Shared) -> Result<AccountBuilder, String> {
         ),
         None => None,
     };
-    let client = Client::builder(TokioExecutor::new())
-        .build::<_, BodyWrapper<Bytes>>(https::connector(authorities, false)?);
+    let client = https::AcmeClient::new(https::connector(authorities, false)?);
     Ok(Account::builder_with_http(Box::new(client)))
 }
 
