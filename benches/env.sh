@@ -11,12 +11,23 @@ echo "commit: $commit"
 echo "os: $(uname -srm)"
 echo "rustc: $(rustc --version 2>/dev/null || echo unknown)"
 
+# Prints the first line of what a tool says about its version, or that it is not installed.
+version() {
+    if command -v "$1" >/dev/null; then "$@" 2>&1 | head -n 1; else echo "not installed"; fi
+}
+echo "nginx: $(version nginx -v)"
+echo "oha: $(version oha --version)"
+echo "python: $(version python3 --version)"
+echo "openssl: $(version openssl version)"
+
 case "$(uname -s)" in
     Linux)
         echo "cpu: $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | sed 's/^ //')"
         echo "cores: $(nproc)"
         echo "memory: $(free -h | awk '/^Mem:/ {print $2}')"
         echo "cpu governor: $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo unknown)"
+        echo "swap: $(free -h | awk '/^Swap:/ {print $2}')"
+        echo "transparent huge pages: $(cat /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null || echo unknown)"
         for key in net.core.somaxconn net.ipv4.tcp_max_syn_backlog net.ipv4.ip_local_port_range \
             net.ipv4.tcp_tw_reuse; do
             echo "$key: $(sysctl -n "$key" 2>/dev/null | tr '\t' ' ' || echo unknown)"
