@@ -48,6 +48,9 @@ SECOND_UPSTREAM_PORT = 18082  # a second upstream, for scenario 6
 STATUS_PORT = 18089  # stub_status of the upstream
 WS_PORT = 18090  # the WebSocket upstream of scenario 5
 
+# WebSocket connections that scenario 5 holds, 1000 with --quick. Each takes two through the proxy.
+WS_CONNECTIONS = 10_000
+
 # Latency above which a rate counts as too high, in seconds, and the share of errors.
 P99_LIMIT = 0.050
 ERROR_LIMIT = 0.01
@@ -94,8 +97,10 @@ def raise_open_files() -> int:
     if soft < wanted:
         resource.setrlimit(resource.RLIMIT_NOFILE, (wanted, hard))
     soft, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
-    if soft < 65_536:
-        print(f"warning: only {soft} open files allowed, scenario 5 needs about 40000", flush=True)
+    # To standard error: the WebSocket clients of scenario 5 answer on standard output.
+    if soft < 2 * WS_CONNECTIONS + 1024:
+        print(f"warning: only {soft} open files allowed, scenario 5 needs about {2 * WS_CONNECTIONS + 1024}",
+              file=sys.stderr, flush=True)
     return soft
 
 
@@ -219,7 +224,8 @@ class Usage:
 
     @staticmethod
     def of(pid: int) -> Usage:
-        """Adds up the user and system time and the resident memory of `pid` and its children."""
+        """Adds up the user and system time and the resident memory of `pid` and its children. The
+        time includes children that ended, such as the workers that Nginx replaces on a reload."""
         ticks = os.sysconf("SC_CLK_TCK")
         cpu, rss, peak = 0.0, 0, 0
         for member in process_tree(pid):
@@ -229,7 +235,8 @@ class Usage:
             except OSError:
                 continue
             fields = stat[stat.rindex(")") + 2 :].split()
-            cpu += (int(fields[11]) + int(fields[12])) / ticks
+            # utime and stime, then cutime and cstime of the children it waited for.
+            cpu += sum(int(value) for value in fields[11:15]) / ticks
             rss += kib(status, "VmRSS") * 1024
             peak += kib(status, "VmHWM") * 1024
         return Usage(cpu, rss, peak)
@@ -314,6 +321,9 @@ class Settings:
     features: tuple[str, ...] = ()  # headers, ratelimit, apikey, accesslog-json, accesslog-combined
     targets: tuple[int, ...] = ()  # ports of the upstream targets; the upstream of the protocol if empty
     generation: int = 0  # changes a response header, for the reloads of scenario 8
+    # Of each Nginx worker, which allocates them up front, about 450 bytes each: enough for every
+    # scenario but the fifth, which raises it.
+    worker_connections: int = 4096
 
 
 API_KEY = "bench-key-0123456789abcdef"
@@ -389,14 +399,14 @@ def wormway_config(work: Work, settings: Settings) -> str:
     return "\n".join(lines) + "\n"
 
 
-def nginx_common(work: Work, name: str, workers: int) -> list[str]:
+def nginx_common(work: Work, name: str, workers: int, connections: int = Settings.worker_connections) -> list[str]:
     """The top of an nginx configuration: workers, files of the run and limits."""
     lines = [
         f"worker_processes {workers};",
         f"worker_rlimit_nofile {work.open_files};",
         f"pid {work.path(name + '.pid')};",
         f"error_log {work.path(name + '-error.log')} warn;",
-        f"events {{ worker_connections {min(65_536, work.open_files)}; }}",
+        f"events {{ worker_connections {min(connections, work.open_files)}; }}",
     ]
     if os.geteuid() == 0:
         # Workers would run as nobody, which cannot read the files of the run.
@@ -418,7 +428,7 @@ def nginx_listen(work: Work, port: int, extra: str = "", backlog: int = 4096) ->
 
 def nginx_proxy_config(work: Work, settings: Settings) -> str:
     """The configuration of Nginx as the proxy under test, the counterpart of `wormway_config`."""
-    lines = nginx_common(work, "nginx", settings.threads)
+    lines = nginx_common(work, "nginx", settings.threads, settings.worker_connections)
     targets = "\n".join(
         f"        server 127.0.0.1:{port} max_fails=1 fail_timeout=10s;"
         for port in settings.targets or (UPSTREAM_PORT,)
@@ -435,26 +445,7 @@ def nginx_proxy_config(work: Work, settings: Settings) -> str:
         route_extra.append("limit_req zone=bench burst=1000000 nodelay;")
     if "apikey" in settings.features:
         route_extra.append(f'if ($http_x_api_key != "{API_KEY}") {{ return 401; }}')
-    lines += [
-        "http {",
-        "    log_format bench_json escape=json '{\"time\":\"$time_iso8601\",\"client_ip\":\"$remote_addr\","
-        "\"method\":\"$request_method\",\"uri\":\"$request_uri\",\"status\":$status,"
-        "\"duration\":$request_time,\"upstream_duration\":\"$upstream_response_time\"}';",
-        f"    {access_log}",
-        "    keepalive_timeout 75s;",
-        "    keepalive_requests 1000;",
-        "    limit_req_zone $binary_remote_addr zone=bench:10m rate=1000000r/s;",
-        "    upstream app {",
-        targets,
-        f"        keepalive {settings.pool_size};",
-        "    }",
-        f"    upstream ws {{ server 127.0.0.1:{WS_PORT}; }}",
-        "    server {",
-        f"        {nginx_listen(work, HTTP_PORT, backlog=settings.backlog)}",
-        f"        {nginx_listen(work, HTTPS_PORT, 'ssl http2', backlog=settings.backlog)}",
-        f"        {nginx_http2(work)}",
-        f"        ssl_certificate {work.path('cert.pem')};",
-        f"        ssl_certificate_key {work.path('key.pem')};",
+    locations = [
         "        location / {",
         "            proxy_pass http://app;",
         "            proxy_http_version 1.1;",
@@ -471,6 +462,36 @@ def nginx_proxy_config(work: Work, settings: Settings) -> str:
         '            proxy_set_header Connection "upgrade";',
         "            proxy_read_timeout 1h;",
         "        }",
+    ]
+    # Wormway limits the requests of HTTP/1.1 connections only. Nginx closes HTTP/2 connections
+    # after keepalive_requests too, since 1.19.7, and oha fails the requests in flight then: lift it
+    # on the TLS server, whose only HTTP/1.1 load, scenario 3, does not keep connections alive.
+    h2_requests = "keepalive_requests" if work.nginx >= (1, 19, 7) else "http2_max_requests"
+    lines += [
+        "http {",
+        "    log_format bench_json escape=json '{\"time\":\"$time_iso8601\",\"client_ip\":\"$remote_addr\","
+        "\"method\":\"$request_method\",\"uri\":\"$request_uri\",\"status\":$status,"
+        "\"duration\":$request_time,\"upstream_duration\":\"$upstream_response_time\"}';",
+        f"    {access_log}",
+        "    keepalive_timeout 75s;",
+        "    keepalive_requests 1000;",
+        "    limit_req_zone $binary_remote_addr zone=bench:10m rate=1000000r/s;",
+        "    upstream app {",
+        targets,
+        f"        keepalive {settings.pool_size};",
+        "    }",
+        f"    upstream ws {{ server 127.0.0.1:{WS_PORT}; }}",
+        "    server {",
+        f"        {nginx_listen(work, HTTP_PORT, backlog=settings.backlog)}",
+        *locations,
+        "    }",
+        "    server {",
+        f"        {nginx_listen(work, HTTPS_PORT, 'ssl http2', backlog=settings.backlog)}",
+        f"        {nginx_http2(work)}",
+        f"        {h2_requests} 1000000000;",
+        f"        ssl_certificate {work.path('cert.pem')};",
+        f"        ssl_certificate_key {work.path('key.pem')};",
+        *locations,
         "    }",
         "}",
     ]
@@ -696,7 +717,8 @@ def measure(proxy: Proxy, layout: Layout, load: Load, rate: float, options: Opti
 
 
 def outcome(result: dict) -> tuple[float, float, float]:
-    """Requests per second, p99 latency and share of errors of a measurement."""
+    """Requests per second, p99 latency and share of errors of a measurement. Requests that were
+    still waiting when the run ended count for neither: oha's own rate counts them."""
     report = result.get("oha") or {}
     summary = report.get("summary", {})
     statuses = report.get("statusCodeDistribution", {})
@@ -705,8 +727,9 @@ def outcome(result: dict) -> tuple[float, float, float]:
     failed = sum(count for status, count in statuses.items() if not status.startswith("2"))
     failed += sum(count for reason, count in errors.items() if "deadline" not in reason)
     total = ok + failed
+    seconds = summary.get("total") or 0.0
     p99 = report.get("latencyPercentiles", {}).get("p99") or 0.0
-    return summary.get("requestsPerSec", 0.0), p99, (failed / total if total else 1.0)
+    return (total / seconds if seconds else 0.0), p99, (failed / total if total else 1.0)
 
 
 def ladder(proxy: Proxy, layout: Layout, load: Load, rates: list[float], options: Options, out: Path) -> None:
@@ -770,7 +793,9 @@ def scenario_4(proxy: Proxy, run: Run) -> None:
 
 def scenario_5(proxy: Proxy, run: Run) -> None:
     """Memory of idle WebSocket connections: the growth of the resident memory of the proxy."""
-    count = 1000 if run.options.quick else 10000
+    count = 1000 if run.options.quick else WS_CONNECTIONS
+    settings = run.settings()
+    settings.worker_connections = max(settings.worker_connections, 2 * count + 1024)
     out = run.out(5, proxy)
     out.mkdir(parents=True, exist_ok=True)
     upstream = Process("ws-upstream", run.layout.pin(run.layout.tools, [sys.executable, __file__, "ws-upstream",
@@ -780,7 +805,7 @@ def scenario_5(proxy: Proxy, run: Run) -> None:
     try:
         for repeat in range(1, run.options.repeats + 1):
             print(f"    {count} connections, run {repeat}/{run.options.repeats}", flush=True)
-            proxy.start(run.settings())
+            proxy.start(settings)
             time.sleep(2)
             base = Usage.of(proxy.pid)
             clients = subprocess.Popen(
@@ -907,43 +932,52 @@ SCENARIOS = {1: scenario_1, 2: scenario_2, 3: scenario_3, 4: scenario_4, 5: scen
 # ---- Variants of Wormway alone ----
 
 
-def variants(run: Run, wormway: Proxy) -> None:
-    """Wormway with other settings or allocators, against its defaults: allocators on scenarios 1,
-    4 and 5; backlog 128 on scenario 3; a pool of one idle upstream connection per thread with 256
+def variants(run: Run, wormway: Proxy, scenarios: list[int]) -> None:
+    """Wormway with other settings or allocators, against its defaults, on those of `scenarios`
+    that each needs: allocators on scenarios 1, 4 and 5; backlog 128 on scenario 3; the default
+    pool of idle upstream connections against a pool of one per thread, both with 256
     connections; upstreams over HTTP/2; and with 4 CPUs or more, threads and reuseport."""
     allocators = [name for name in ALLOCATORS[1:] if (BINARIES / f"wormway-{name}").exists()]
     for name in allocators:
+        numbers = [number for number in (1, 4, 5) if number in scenarios]
+        if not numbers:
+            break
         print(f"  allocator {name}", flush=True)
         proxy = Proxy("wormway", BINARIES / f"wormway-{name}", run.work, run.layout)
-        for number in (1, 4, 5):
+        for number in numbers:
             run.variant = f"alloc-{name}"
             SCENARIOS[number](proxy, run)
         proxy.stop()
     if not allocators:
         print("  no binaries of other allocators: run `bench.py build` first", flush=True)
-    run.variant = "backlog-128"
-    print("  backlog 128", flush=True)
-    run.overrides = {"backlog": 128}
-    scenario_3(wormway, run)
-    run.variant, run.overrides = "pool-1", {"pool_size": 1}
-    print("  pool of 1 per thread, 256 connections", flush=True)
-    wormway.start(run.settings())
-    ladder(wormway, run.layout, Load(f"{HTTP}/", connections=256),
-           rates([2000, 5000, 10000, 20000], [5000], run.options), run.options, run.out(1, wormway))
-    for protocol in ("h2c", "h2"):
-        run.variant, run.overrides = f"upstream-{protocol}", {"upstream_protocol": protocol}
-        print(f"  upstreams over {protocol}", flush=True)
-        scenario_1(wormway, run)
-    if len(run.layout.proxy) >= 2:
-        run.variant, run.overrides = "threads-1", {"threads": 1}
-        print("  one thread", flush=True)
-        scenario_1(wormway, run)
+    if 3 in scenarios:
+        run.variant = "backlog-128"
+        print("  backlog 128", flush=True)
+        run.overrides = {"backlog": 128}
+        scenario_3(wormway, run)
+    if 1 in scenarios:
+        for size in (Settings.pool_size, 1):
+            run.variant, run.overrides = f"pool-{size}", {"pool_size": size}
+            print(f"  pool of {size} per thread, 256 connections", flush=True)
+            wormway.start(run.settings())
+            ladder(wormway, run.layout, Load(f"{HTTP}/", connections=256),
+                   rates([2000, 5000, 10000, 20000], [5000], run.options), run.options, run.out(1, wormway))
+        for protocol in ("h2c", "h2"):
+            run.variant, run.overrides = f"upstream-{protocol}", {"upstream_protocol": protocol}
+            print(f"  upstreams over {protocol}", flush=True)
+            scenario_1(wormway, run)
+    numbers = [number for number in (1, 3) if number in scenarios]
+    if numbers and len(run.layout.proxy) < 2:
+        print("  threads and reuseport need 2 CPUs for the proxy, 4 in all: skipped", flush=True)
+    elif numbers:
+        if 1 in numbers:
+            run.variant, run.overrides = "threads-1", {"threads": 1}
+            print("  one thread", flush=True)
+            scenario_1(wormway, run)
         run.variant, run.overrides = "reuseport", {"reuseport": True}
         print("  reuseport", flush=True)
-        scenario_1(wormway, run)
-        scenario_3(wormway, run)
-    else:
-        print("  threads and reuseport need 2 CPUs for the proxy, 4 in all: skipped", flush=True)
+        for number in numbers:
+            SCENARIOS[number](wormway, run)
     run.variant, run.overrides = "", {}
     wormway.stop()
 
@@ -1025,7 +1059,7 @@ def command_run(args: argparse.Namespace) -> None:
                     proxy.stop()
         if args.variants and "wormway" in proxies:
             print("variants of Wormway", flush=True)
-            variants(run, Proxy("wormway", binary, work, layout))
+            variants(run, Proxy("wormway", binary, work, layout), scenarios)
     finally:
         for process in upstreams:
             process.stop()
@@ -1051,8 +1085,10 @@ def command_build(_: argparse.Namespace) -> None:
     for name in ALLOCATORS:
         features = [] if name == "system" else ["--features", name]
         print(f"building with the {name} allocator", flush=True)
-        subprocess.run(["cargo", "build", "--release", "--locked", "-p", "wormway", *features], cwd=REPO,
-                       check=True)
+        built = subprocess.run(["cargo", "build", "--release", "--locked", "-p", "wormway", *features], cwd=REPO)
+        if built.returncode != 0:
+            sys.exit(f"cargo build failed with the {name} allocator; see its output above and the build "
+                     "tools in benches/README.md")
         shutil.copy2(REPO / "target/release/wormway", BINARIES / f"wormway-{name}")
     print(f"binaries in {BINARIES}")
 

@@ -50,25 +50,27 @@ A rate ladder stops at the first rate where the proxy falls more than 10% behind
 50 ms, or more than 1% of the requests fail.
 
 Then Wormway alone, against its defaults: the jemalloc and mimalloc allocators on scenarios 1,
-4 and 5; a backlog of 128 on scenario 3; a pool of one idle upstream connection per thread with
-256 connections; upstreams over h2c and over HTTP/2 with TLS on scenario 1; and, with at least
-two CPUs for the proxy, one thread against several and `reuseport`.
+4 and 5; a backlog of 128 on scenario 3; the default pool of idle upstream connections against a
+pool of one per thread, both with 256 connections; upstreams over h2c and over HTTP/2 with TLS on
+scenario 1; and, with at least two CPUs for the proxy, one thread against several and
+`reuseport`. `--scenarios` selects the variants too.
 
 What each run records: oha's latency report, the CPU time and the resident memory of the proxy
 (with its worker processes for Nginx), the connections that the kernel dropped from full accept
 queues (`/proc/net/netstat`), and the requests per upstream connection (`stub_status` of the
 upstream).
 
-## On a Debian 12 server
+## On a Debian or Ubuntu server
 
-Install Nginx from nginx.org, for its current stable version, and stop the service it starts:
-`bench.py` starts its own instances.
+Install the build tools, cmake included (Pingora builds zlib-ng with it), and Nginx from
+nginx.org, for its current stable version, then stop the service it starts: `bench.py` starts its
+own instances.
 
 ```sh
-sudo apt install curl gnupg2 ca-certificates lsb-release debian-archive-keyring build-essential git
+sudo apt install curl gnupg2 ca-certificates lsb-release build-essential cmake git
 curl https://nginx.org/keys/nginx_signing.key | gpg --dearmor \
     | sudo tee /usr/share/keyrings/nginx-archive-keyring.gpg >/dev/null
-echo "deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] http://nginx.org/packages/debian $(lsb_release -cs) nginx" \
+echo "deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] http://nginx.org/packages/$(. /etc/os-release && echo "$ID") $(lsb_release -cs) nginx" \
     | sudo tee /etc/apt/sources.list.d/nginx.list
 sudo apt update && sudo apt install nginx
 sudo systemctl disable --now nginx
@@ -84,8 +86,8 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
 Build Wormway once per allocator, into `target/bench/`. The release profile links the whole
-program at once, which needs more memory than 2 GB: add a swap file for the build, and remove it
-before measuring, so that swapping does not distort the memory figures.
+program at once, which needs more than 2 GB of memory: on smaller machines, add a swap file for
+the build, and remove it before measuring, so that swapping does not distort the memory figures.
 
 ```sh
 sudo fallocate -l 4G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
@@ -122,6 +124,11 @@ every minute, to compare the allocators over a long run.
   saturated before the proxy's, the rate ladder stops early for both proxies alike.
 - Scenario 3 measures what oha does: it may resume TLS sessions, which both proxies allow, so
   not every handshake is a full one. Wormway prefers the post-quantum key exchange
-  `X25519MLKEM768`, which costs more than the `X25519` of the OpenSSL of Debian 12, when the
-  client offers it.
+  `X25519MLKEM768`, which costs more than the `X25519` of OpenSSL before 3.5 (Debian 12, Ubuntu
+  22.04 and 24.04), when the client offers it.
 - Wormway keeps a pool of idle upstream connections per listener; Nginx one per worker process.
+- Nginx allocates the connections of each worker up front, about 450 bytes each, so its resident
+  memory grows with `worker_connections`: 4096, enough for every scenario but the fifth, which
+  raises it to what its connections need.
+- Nginx closes HTTP/2 connections after `keepalive_requests` too, and oha fails the requests in
+  flight then, so the TLS server of Nginx has no such limit, as Wormway has none for HTTP/2.
