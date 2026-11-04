@@ -340,6 +340,10 @@ mod tests {
             config.server.shutdown_timeout.get(),
             std::time::Duration::from_secs(30)
         );
+        assert_eq!(config.server.backlog.get(), 4096);
+        assert!(!config.server.reuseport);
+        assert_eq!(config.server.upstream_keepalive_pool_size.get(), 128);
+        assert_eq!(HttpSettings::default().keepalive_requests().get(), 1000);
         assert_eq!(config.log.format, LogFormat::Text);
         assert_eq!(config.admin.listen, "127.0.0.1:9872".parse().unwrap());
         assert_eq!(config.config.source, ConfigSource::Db);
@@ -355,6 +359,9 @@ mod tests {
             [server]
             threads = 4
             shutdown_timeout = "1m30s"
+            backlog = 511
+            reuseport = true
+            upstream_keepalive_pool_size = 64
             [log]
             level = "debug"
             format = "json"
@@ -369,6 +376,7 @@ mod tests {
             listen = ["0.0.0.0:443", "[::]:443"]
             protocol = "http"
             tls = { certificates = ["example"] }
+            http = { keepalive_requests = 100 }
             [certificates.example]
             cert = "example.crt"
             key = "example.key"
@@ -376,9 +384,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(config.server.shutdown_timeout.get().as_secs(), 90);
+        assert_eq!(config.server.backlog.get(), 511);
+        assert!(config.server.reuseport);
+        assert_eq!(config.server.upstream_keepalive_pool_size.get(), 64);
         assert_eq!(config.config.source, ConfigSource::File);
         let listener = &config.listeners["websecure"];
         assert_eq!(listener.listen.len(), 2);
+        assert_eq!(listener.http.keepalive_requests().get(), 100);
         assert_eq!(
             listener.tls.as_ref().unwrap().certificates[0].as_str(),
             "example"
@@ -510,6 +522,13 @@ mod tests {
 
         let error = parse_error("version = 1\n[admin]\nlisten = \"localhost:9872\"\n");
         assert_eq!(error.position, at(3, 10));
+
+        let error = parse_error("version = 1\n[server]\nbacklog = 0\n");
+        assert_eq!(error.position, at(3, 11));
+        let error = parse_error(
+            "version = 1\n[listeners.web]\nlisten = []\nprotocol = \"http\"\nhttp = { keepalive_requests = 0 }\n",
+        );
+        assert!(error.message.contains("nonzero"), "{error}");
 
         let error = parse_error("version = 1\n[listeners.Web]\nlisten = []\nprotocol = \"http\"\n");
         assert_eq!(error.position, at(2, 12));

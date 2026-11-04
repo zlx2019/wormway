@@ -18,7 +18,7 @@ use crate::health::UpstreamReport;
 use crate::host::Host;
 use crate::service::{BoxError, ServiceFactory, Services};
 use crate::snapshot::Snapshot;
-use crate::socket::{self, Bound, Socket};
+use crate::socket::{self, Bound, Socket, SocketOptions};
 use crate::stats::TrafficReport;
 use crate::telemetry;
 use crate::tls::{AcmeCertificateReport, CertificateReport};
@@ -32,6 +32,8 @@ pub struct Server {
     services: Services,
     /// How long connections may take to finish when their service drains.
     shutdown_timeout: Duration,
+    /// How the listening sockets are opened.
+    socket_options: SocketOptions,
     /// The running listeners. Held from `prepare` to `commit`, so changes do not overlap.
     state: Mutex<State>,
     /// The configuration in effect.
@@ -76,10 +78,12 @@ impl Server {
         config: Config,
     ) -> Result<Self, ApplyError> {
         telemetry::describe();
+        let workers = handle.metrics().num_workers();
         let server = Self {
             handle,
             services,
             shutdown_timeout: config.server.shutdown_timeout.get(),
+            socket_options: SocketOptions::new(&config.server, workers),
             state: Mutex::default(),
             // Replaced by the first apply below before anyone can see it.
             snapshot: ArcSwap::from_pointee(Snapshot {
@@ -303,13 +307,15 @@ impl Server {
                         kept[i] = true;
                         Planned::Kept(i)
                     }
-                    None => Planned::New(socket::bind(addr, &self.handle).map_err(|source| {
-                        ApplyError::Bind {
-                            listener: name.clone(),
-                            addr,
-                            source,
-                        }
-                    })?),
+                    None => Planned::New(
+                        socket::bind(addr, self.socket_options, &self.handle).map_err(
+                            |source| ApplyError::Bind {
+                                listener: name.clone(),
+                                addr,
+                                source,
+                            },
+                        )?,
+                    ),
                 };
                 sockets.push((name.clone(), planned));
             }

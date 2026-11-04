@@ -27,6 +27,7 @@ mod telemetry;
 mod upstream;
 mod upstream_tls;
 
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
@@ -44,7 +45,7 @@ pub struct Gateway {
     /// Routes and upstreams in effect, shared by the listeners and the engine.
     snapshot: Arc<ArcSwap<GatewaySnapshot>>,
     /// Pingora settings of every proxy.
-    conf: Arc<ServerConf>,
+    conf: ServerConf,
     /// Certificates of the listeners with TLS.
     certificates: Certificates,
     /// Where the line of each request goes, if the access log is on.
@@ -62,7 +63,7 @@ impl Gateway {
         };
         Self {
             snapshot: Arc::new(ArcSwap::from_pointee(GatewaySnapshot::default())),
-            conf: Arc::new(conf),
+            conf,
             certificates,
             access_log: None,
         }
@@ -71,6 +72,14 @@ impl Gateway {
     /// Writes a line for every request to `access_log`.
     pub fn with_access_log(mut self, access_log: AccessLog) -> Self {
         self.access_log = Some(access_log);
+        self
+    }
+
+    /// Keeps up to `size` idle connections to upstreams per worker thread, in the pool of each
+    /// listener, instead of 128. Pingora reuses connections even with a pool of 0, hence at
+    /// least 1.
+    pub fn with_upstream_keepalive_pool_size(mut self, size: NonZeroUsize) -> Self {
+        self.conf.upstream_keepalive_pool_size = size.get();
         self
     }
 
@@ -83,8 +92,12 @@ impl Gateway {
         let report = Report(self.snapshot.clone());
         let traffic = stats::Report(self.snapshot.clone());
         telemetry::describe();
-        let listeners =
-            HttpListeners::new(self.snapshot, self.conf, self.certificates, self.access_log);
+        let listeners = HttpListeners::new(
+            self.snapshot,
+            Arc::new(self.conf),
+            self.certificates,
+            self.access_log,
+        );
         services.register(Protocol::Http, listeners);
         services.add_engine(routing);
         services.set_health_report(report);

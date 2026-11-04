@@ -97,6 +97,8 @@ impl ServiceFactory for HttpListeners {
         let mut options = HttpServerOptions::default();
         // Pingora ignores h2c on TLS connections, which agree on HTTP/2 through ALPN.
         options.h2c = listener.http.h2c();
+        // Pingora counts the reuses of a connection, Nginx and Wormway the requests on it.
+        options.keepalive_request_limit = Some(listener.http.keepalive_requests().get() - 1);
         options.h2_idle_timeout = Some(keepalive.http2);
         proxy.server_options = Some(options);
         Ok(Arc::new(HttpService {

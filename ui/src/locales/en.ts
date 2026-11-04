@@ -312,6 +312,9 @@ export const en = {
     keepalive: "Keep-alive time limit",
     keepaliveHint:
       "How long an idle connection stays open; 0s closes it after each request.",
+    keepaliveRequests: "Requests per connection",
+    keepaliveRequestsHint:
+      "An HTTP/1.1 connection closes after this many requests; HTTP/2 has no such limit.",
     h2c: "HTTP/2 without TLS (h2c)",
     h2cHint: "Takes HTTP/2 from clients that start with it, besides HTTP/1.1.",
   },

@@ -9,6 +9,10 @@ version = 1
 [server]
 threads = 0                 # data-plane worker threads, 0 = one per CPU core
 shutdown_timeout = "30s"    # how long open connections may take to finish on shutdown
+backlog = 4096              # connections each listening socket holds until accepted; the system
+                            # caps it, on Linux at net.core.somaxconn
+reuseport = false           # Linux: one socket per worker thread on every listening address
+upstream_keepalive_pool_size = 128   # idle upstream connections per worker thread, per listener
 
 [log]
 level = "info"              # tracing directives, such as "info,wormway_runtime=debug"
@@ -43,10 +47,11 @@ directory = "letsencrypt"   # letsencrypt-staging, or the https:// URL of anothe
 # ---- Dynamic settings: read from this file only when config.source = "file" ----
 
 [listeners.web]
-listen = ["0.0.0.0:8080"]
+listen = ["0.0.0.0:8080"]   # add "[::]:8080" for IPv6: IPv6 addresses take IPv6 only
 protocol = "http"
-http = { keepalive_timeout = "75s", h2c = false }   # defaults; "0s" turns keep-alive off,
-                                                    # h2c accepts HTTP/2 without TLS
+# Defaults. "0s" turns keep-alive off; an HTTP/1.1 connection closes after keepalive_requests
+# requests; h2c accepts HTTP/2 without TLS.
+http = { keepalive_timeout = "75s", keepalive_requests = 1000, h2c = false }
 
 [listeners.websecure]
 listen = ["0.0.0.0:8443"]

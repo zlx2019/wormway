@@ -346,6 +346,25 @@ async fn closes_idle_connections_after_the_keepalive_timeout() {
     assert_eq!(default.get("/").await.status, 200);
 }
 
+/// A connection closes after the requests that its listener allows: the response to the last
+/// one asks the client to close.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn closes_connections_after_their_requests() {
+    let a = upstream("a").await;
+    let server = start(&format!(
+        "[listeners.web]\nlisten = [\"127.0.0.1:0\"]\nprotocol = \"http\"\nhttp = {{ keepalive_requests = 3 }}\n[routes.all]\nupstream = \"app\"\n[upstreams.app]\ntargets = [\"{a}\"]\n"
+    ))
+    .await;
+    let mut raw = Raw::connect(addr(&server, "web").await).await;
+    for _ in 0..2 {
+        assert_eq!(raw.get("/").await.header("connection"), Some("keep-alive"));
+    }
+    let last = raw.get("/").await;
+    assert_eq!(last.status, 200);
+    assert_eq!(last.header("connection"), Some("close"));
+    assert!(raw.closed_within(Duration::from_secs(1)).await);
+}
+
 /// A keep-alive timeout of zero closes every connection after its response.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn zero_keepalive_closes_after_each_response() {

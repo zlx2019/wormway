@@ -382,6 +382,65 @@ async fn retries_closed_idle_connections() {
     assert_eq!(read.load(Ordering::SeqCst), 4, "the POST was sent once");
 }
 
+/// Each listener keeps `upstream_keepalive_pool_size` idle upstream connections per worker
+/// thread, for all its upstreams together. With one per thread, two here, the connection to the
+/// first of three upstreams is closed by the time it gets its next request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn keeps_idle_upstream_connections_as_configured() {
+    let mut targets = Vec::new();
+    let mut connections = Vec::new();
+    for _ in 0..3 {
+        let opened = Arc::new(AtomicUsize::new(0));
+        let counted = opened.clone();
+        let (target, _) = raw_upstream(move |index| {
+            if index == 0 {
+                counted.fetch_add(1, Ordering::SeqCst);
+            }
+            Reply::Keep("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+        })
+        .await;
+        targets.push(target);
+        connections.push(opened);
+    }
+    let [a, b, c] = [targets[0], targets[1], targets[2]];
+    for (pool_size, expected) in [(128, 1), (1, 2)] {
+        for opened in &connections {
+            opened.store(0, Ordering::SeqCst);
+        }
+        let server = start(&format!(
+            r#"
+            [server]
+            upstream_keepalive_pool_size = {pool_size}
+            [routes.a]
+            match = {{ paths = ["/a"] }}
+            upstream = "a"
+            [routes.b]
+            match = {{ paths = ["/b"] }}
+            upstream = "b"
+            [routes.c]
+            match = {{ paths = ["/c"] }}
+            upstream = "c"
+            [upstreams.a]
+            targets = ["{a}"]
+            [upstreams.b]
+            targets = ["{b}"]
+            [upstreams.c]
+            targets = ["{c}"]
+            "#
+        ))
+        .await;
+        let web = addr(&server, "web").await;
+        for path in ["/a", "/b", "/c", "/a"] {
+            assert_eq!(get(web, path).await, (200, "ok".to_owned()));
+        }
+        assert_eq!(
+            connections[0].load(Ordering::SeqCst),
+            expected,
+            "connections to the first upstream with a pool of {pool_size}"
+        );
+    }
+}
+
 /// An upstream that takes too long gets 504, unless the route allows it more time.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn answers_504_when_upstreams_take_too_long() {

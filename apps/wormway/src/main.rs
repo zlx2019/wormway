@@ -13,6 +13,24 @@ use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
 
+// Allocators to compare with the system's, see benches/. With both features on, as with
+// --all-features, jemalloc is the one.
+#[cfg(feature = "jemalloc")]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+#[cfg(all(feature = "mimalloc", not(feature = "jemalloc")))]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+/// The allocator built in, for the log.
+const ALLOCATOR: &str = if cfg!(feature = "jemalloc") {
+    "jemalloc"
+} else if cfg!(feature = "mimalloc") {
+    "mimalloc"
+} else {
+    "system"
+};
+
 /// Environment variable that sets the configuration file path.
 const CONFIG_ENV: &str = "WORMWAY_CONFIG";
 /// Environment variable that sets the Admin API token instead of the token file.

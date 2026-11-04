@@ -292,6 +292,9 @@ export const zh: Messages = {
     sniReject: "拒绝握手",
     keepalive: "Keep-alive 超时",
     keepaliveHint: "空闲连接保持多久；0s 表示每个请求后关闭。",
+    keepaliveRequests: "每个连接的请求数",
+    keepaliveRequestsHint:
+      "一个 HTTP/1.1 连接处理这么多请求后关闭；HTTP/2 不受限制。",
     h2c: "不加密的 HTTP/2（h2c）",
     h2cHint: "除 HTTP/1.1 外，也接受直接以 HTTP/2 开始的客户端。",
   },

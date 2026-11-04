@@ -1,6 +1,7 @@
 //! `wormway run`: serves until a shutdown signal, reloads the configuration and certificate
 //! files on SIGHUP, and opens the access log file again on SIGUSR1.
 
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -57,7 +58,11 @@ pub fn run(path: &Path) -> anyhow::Result<ExitCode> {
         }
     };
     logging::init(&config.log)?;
-    info!("Wormway {} starting", env!("CARGO_PKG_VERSION"));
+    info!(
+        allocator = crate::ALLOCATOR,
+        "Wormway {} starting",
+        env!("CARGO_PKG_VERSION")
+    );
     let data_dir = load::data_dir(path, &config);
     std::fs::create_dir_all(&data_dir)
         .with_context(|| format!("cannot create the data directory {}", data_dir.display()))?;
@@ -118,10 +123,12 @@ fn data_plane(threads: usize) -> std::io::Result<Runtime> {
 
 /// Service factories and engines of the protocols built into this binary: the certificates,
 /// ACME as `acme` says, which keeps its accounts and certificates in `store`, and the HTTP
-/// gateway, which writes to `access_log` if set. `threads` is the number of data-plane workers;
-/// relative paths are resolved against `config_dir`. Returns ACME as well, to run it.
+/// gateway, which writes to `access_log` if set. `threads` is the number of data-plane workers,
+/// and each listener keeps up to `pool_size` idle upstream connections per worker; relative
+/// paths are resolved against `config_dir`. Returns ACME as well, to run it.
 fn services(
     threads: usize,
+    pool_size: NonZeroUsize,
     config_dir: &Path,
     access_log: Option<AccessLog>,
     acme: &AcmeSettings,
@@ -132,7 +139,7 @@ fn services(
     certificates.register(&mut services);
     let acme = Acme::new(acme, certificates.clone(), AcmeStore(store), config_dir);
     acme.register(&mut services);
-    let gateway = Gateway::new(threads, certificates);
+    let gateway = Gateway::new(threads, certificates).with_upstream_keepalive_pool_size(pool_size);
     match access_log {
         Some(access_log) => gateway.with_access_log(access_log),
         None => gateway,
@@ -165,6 +172,7 @@ async fn serve(setup: Setup, data_plane: Handle) -> anyhow::Result<ExitCode> {
     let config_dir = load::config_dir(&path);
     let (services, acme) = services(
         workers,
+        config.server.upstream_keepalive_pool_size,
         config_dir,
         access_log.clone(),
         &config.acme,

@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next"
 import {
   Group,
   LinesSetting,
+  NumberSetting,
   RowsSetting,
   Section,
   SelectSetting,
@@ -77,6 +78,12 @@ export function ListenerForm() {
           label={t("listeners.keepalive")}
           hint={t("listeners.keepaliveHint")}
           placeholder="75s"
+        />
+        <NumberSetting
+          path="http.keepalive_requests"
+          label={t("listeners.keepaliveRequests")}
+          hint={t("listeners.keepaliveRequestsHint")}
+          placeholder="1000"
         />
         <SwitchSetting
           path="http.h2c"

@@ -212,6 +212,91 @@ async fn serves_connections() {
     assert_eq!(server.snapshot().version, 1);
 }
 
+/// One port listens on IPv4 and IPv6 at once: IPv6 sockets take IPv6 connections only, so they
+/// do not collide with the IPv4 socket. Linux only, as it listens on every address.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn listens_on_ipv4_and_ipv6_at_once() {
+    let port = free_port();
+    let (_server, _) = start(&format!(
+        "[listeners.web]\nlisten = [\"0.0.0.0:{port}\", \"[::]:{port}\"]\nprotocol = \"http\"\n"
+    ))
+    .await;
+    for host in ["127.0.0.1", "[::1]"] {
+        let addr = format!("{host}:{port}").parse().expect("address");
+        let mut client = Client::connect(addr).await;
+        assert_eq!(client.ask("ping").await.as_deref(), Some("1 false ping"));
+    }
+}
+
+/// With reuseport every worker thread gets a socket on each address, port 0 included, and
+/// connections reach the service through any of them.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn opens_a_socket_per_worker_with_reuseport() {
+    let (server, _) = start(&format!("[server]\nreuseport = true\n{WEB}")).await;
+    let web = addr(&server, "web").await;
+    assert_eq!(listening_sockets(web.port()), 2);
+    for _ in 0..8 {
+        let mut client = Client::connect(web).await;
+        assert_eq!(client.ask("ping").await.as_deref(), Some("1 false ping"));
+    }
+}
+
+/// Listening sockets get the backlog of the settings, as the system reports it.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn listens_with_the_configured_backlog() {
+    let (server, _) = start(&format!("[server]\nbacklog = 77\n{WEB}")).await;
+    let port = addr(&server, "web").await.port();
+    assert_eq!(listen_backlog(port), Some(77));
+}
+
+/// The backlog of the loopback socket that listens on `port`: the third column of `ss` on
+/// Linux, the last number of the first column of `netstat -L` on macOS.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn listen_backlog(port: u16) -> Option<u32> {
+    use std::process::Command;
+    if cfg!(target_os = "linux") {
+        let filter = format!("sport = :{port}");
+        let output = Command::new("ss").args(["-Hlnt", &filter]).output().ok()?;
+        let text = String::from_utf8(output.stdout).ok()?;
+        text.split_whitespace().nth(2)?.parse().ok()
+    } else {
+        let output = Command::new("netstat")
+            .args(["-Lan", "-p", "tcp"])
+            .output()
+            .ok()?;
+        let text = String::from_utf8(output.stdout).ok()?;
+        let suffix = format!(".{port}");
+        let line = text
+            .lines()
+            .find(|line| line.trim_end().ends_with(&suffix))?;
+        line.split_whitespace()
+            .next()?
+            .rsplit('/')
+            .next()?
+            .parse()
+            .ok()
+    }
+}
+
+/// Counts the IPv4 sockets that listen on `port`, from `/proc/net/tcp`.
+#[cfg(target_os = "linux")]
+fn listening_sockets(port: u16) -> usize {
+    let table = std::fs::read_to_string("/proc/net/tcp").expect("/proc/net/tcp");
+    let local = format!(":{port:04X}");
+    table
+        .lines()
+        .skip(1)
+        .filter(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            // The local address, then the remote one, then the state; 0A is LISTEN.
+            fields.get(1).is_some_and(|addr| addr.ends_with(&local)) && fields.get(3) == Some(&"0A")
+        })
+        .count()
+}
+
 /// Unchanged listeners keep their service and their connections are not told to drain.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn leaves_unchanged_listeners_alone() {

@@ -2,6 +2,7 @@
 
 use std::fmt;
 use std::net::SocketAddr;
+use std::num::NonZeroU32;
 
 use serde::{Deserialize, Serialize};
 
@@ -12,7 +13,8 @@ use super::{Duration, Name};
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Listener {
-    /// Addresses to listen on, such as `["0.0.0.0:443"]`.
+    /// Addresses to listen on, such as `["0.0.0.0:443"]`. IPv6 addresses take IPv6 connections
+    /// only, as in Nginx: `["0.0.0.0:443", "[::]:443"]` serves both.
     pub listen: Vec<SocketAddr>,
     /// Protocol served on these addresses.
     pub protocol: Protocol,
@@ -88,6 +90,11 @@ pub struct HttpSettings {
     /// in Nginx.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keepalive_timeout: Option<Duration>,
+    /// Requests that one HTTP/1.1 connection may carry: the response to the last one closes the
+    /// connection, which frees what the connection holds. HTTP/2 connections have no such
+    /// limit. Default: 1000, as in Nginx.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keepalive_requests: Option<NonZeroU32>,
     /// Accept HTTP/2 without TLS from clients that start with it (prior knowledge), next to
     /// HTTP/1.1. Only for listeners without TLS: those agree on HTTP/2 during the handshake
     /// (ALPN). Default: `false`.
@@ -98,11 +105,19 @@ pub struct HttpSettings {
 impl HttpSettings {
     /// Default of `keepalive_timeout`.
     pub const DEFAULT_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(75);
+    /// Default of `keepalive_requests`.
+    pub const DEFAULT_KEEPALIVE_REQUESTS: NonZeroU32 = NonZeroU32::new(1000).expect("not zero");
 
     /// Returns the keep-alive timeout in effect.
     pub fn keepalive_timeout(&self) -> Duration {
         self.keepalive_timeout
             .unwrap_or(Self::DEFAULT_KEEPALIVE_TIMEOUT)
+    }
+
+    /// Returns the number of requests per HTTP/1.1 connection in effect.
+    pub fn keepalive_requests(&self) -> NonZeroU32 {
+        self.keepalive_requests
+            .unwrap_or(Self::DEFAULT_KEEPALIVE_REQUESTS)
     }
 
     /// Whether HTTP/2 without TLS is accepted.

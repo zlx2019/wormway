@@ -481,6 +481,15 @@
             "null"
           ]
         },
+        "keepalive_requests": {
+          "description": "Requests that one HTTP/1.1 connection may carry: the response to the last one closes the\nconnection, which frees what the connection holds. HTTP/2 connections have no such\nlimit. Default: 1000, as in Nginx.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "keepalive_timeout": {
           "description": "How long a kept-alive HTTP/1.1 connection, or an idle HTTP/2 connection, may wait for its\nnext request before it is closed, rounded up to whole seconds. `\"0s\"` turns HTTP/1.1\nkeep-alive off and closes idle HTTP/2 connections after one second. Default: `\"75s\"`, as\nin Nginx.",
           "pattern": "^([0-9]+(ms|s|m|h|d))+$",
@@ -627,7 +636,7 @@
           "description": "HTTP settings, for protocol `http`."
         },
         "listen": {
-          "description": "Addresses to listen on, such as `[\"0.0.0.0:443\"]`.",
+          "description": "Addresses to listen on, such as `[\"0.0.0.0:443\"]`. IPv6 addresses take IPv6 connections\nonly, as in Nginx: `[\"0.0.0.0:443\", \"[::]:443\"]` serves both.",
           "items": {
             "type": "string"
           },
@@ -1245,6 +1254,18 @@
       "additionalProperties": false,
       "description": "Process settings.",
       "properties": {
+        "backlog": {
+          "default": 4096,
+          "description": "Connections that the system may hold for each listening socket until Wormway accepts\nthem. The system caps it, on Linux at `net.core.somaxconn`. Default: 4096.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "reuseport": {
+          "default": false,
+          "description": "On Linux, open one socket per worker thread on every listening address, and let the\nsystem spread new connections over them. Another process of the same user that does the\nsame on an address shares its connections instead of failing to start. Ignored with a\nwarning on other systems. Default: `false`.",
+          "type": "boolean"
+        },
         "shutdown_timeout": {
           "default": "30s",
           "description": "How long open connections may take to finish when Wormway shuts down or their listener is\nchanged or removed. Connections still open after that are closed.",
@@ -1256,6 +1277,13 @@
           "description": "Worker threads of the data plane. `0` starts one per CPU core.",
           "format": "uint",
           "minimum": 0,
+          "type": "integer"
+        },
+        "upstream_keepalive_pool_size": {
+          "default": 128,
+          "description": "Idle connections to upstreams kept for reuse, per worker thread, by each listener: the\nleast recently used beyond that are closed. Default: 128.",
+          "format": "uint",
+          "minimum": 1,
           "type": "integer"
         }
       },
@@ -1644,8 +1672,11 @@
         }
       ],
       "default": {
+        "backlog": 4096,
+        "reuseport": false,
         "shutdown_timeout": "30s",
-        "threads": 0
+        "threads": 0,
+        "upstream_keepalive_pool_size": 128
       },
       "description": "Process settings. Static: a restart applies changes."
     },

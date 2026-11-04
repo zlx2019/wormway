@@ -1,6 +1,7 @@
 //! Static settings: read from the configuration file at startup, a restart applies changes.
 
 use std::net::{Ipv4Addr, SocketAddr};
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -17,14 +18,37 @@ pub struct ServerSettings {
     /// How long open connections may take to finish when Wormway shuts down or their listener is
     /// changed or removed. Connections still open after that are closed.
     pub shutdown_timeout: Duration,
+    /// Connections that the system may hold for each listening socket until Wormway accepts
+    /// them. The system caps it, on Linux at `net.core.somaxconn`. Default: 4096.
+    pub backlog: NonZeroU32,
+    /// On Linux, open one socket per worker thread on every listening address, and let the
+    /// system spread new connections over them. Another process of the same user that does the
+    /// same on an address shares its connections instead of failing to start. Ignored with a
+    /// warning on other systems. Default: `false`.
+    pub reuseport: bool,
+    /// Idle connections to upstreams kept for reuse, per worker thread, by each listener: the
+    /// least recently used beyond that are closed. Default: 128.
+    pub upstream_keepalive_pool_size: NonZeroUsize,
+}
+
+impl ServerSettings {
+    /// Default of `backlog`.
+    pub const DEFAULT_BACKLOG: NonZeroU32 = NonZeroU32::new(4096).expect("not zero");
+    /// Default of `upstream_keepalive_pool_size`.
+    pub const DEFAULT_UPSTREAM_KEEPALIVE_POOL_SIZE: NonZeroUsize =
+        NonZeroUsize::new(128).expect("not zero");
 }
 
 impl Default for ServerSettings {
-    /// One thread per CPU core, 30 seconds to shut down.
+    /// One thread per CPU core, 30 seconds to shut down, a backlog of 4096 without
+    /// `SO_REUSEPORT`, and 128 idle upstream connections per thread.
     fn default() -> Self {
         Self {
             threads: 0,
             shutdown_timeout: Duration::from_secs(30),
+            backlog: Self::DEFAULT_BACKLOG,
+            reuseport: false,
+            upstream_keepalive_pool_size: Self::DEFAULT_UPSTREAM_KEEPALIVE_POOL_SIZE,
         }
     }
 }

@@ -55,21 +55,24 @@ pub async fn start_logged(
 }
 
 /// Like [`start`], with `certificates` for the listeners with TLS and the answers to HTTP-01
-/// challenges, and the gateway writing to `access_log` if set.
+/// challenges, and the gateway writing to `access_log` if set. The pool of idle upstream
+/// connections takes its size from the configuration, as in the binary.
 pub async fn start_with(
     text: &str,
     certificates: Certificates,
     access_log: Option<AccessLog>,
 ) -> Server {
+    let config = parse(text);
     let mut services = Services::new();
     certificates.register(&mut services);
-    let gateway = Gateway::new(2, certificates);
+    let gateway = Gateway::new(2, certificates)
+        .with_upstream_keepalive_pool_size(config.server.upstream_keepalive_pool_size);
     match access_log {
         Some(access_log) => gateway.with_access_log(access_log),
         None => gateway,
     }
     .register(&mut services);
-    match Server::start(Handle::current(), services, parse(text)).await {
+    match Server::start(Handle::current(), services, config).await {
         Ok(server) => server,
         Err(error) => panic!("cannot start: {error:?}"),
     }

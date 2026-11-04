@@ -45,6 +45,9 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Lint (warnings are errors)
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      # With every feature on, jemalloc wins, so the binary with mimalloc needs its own check.
+      - name: Lint the binary with mimalloc
+        run: cargo clippy -p wormway --features mimalloc --locked -- -D warnings
 
   test:
     name: test (${{ matrix.os }})
