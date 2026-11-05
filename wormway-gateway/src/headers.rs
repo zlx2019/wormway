@@ -1,6 +1,8 @@
 //! Header changes: the headers that tell upstreams about the client, the IDs of requests, and
 //! the header rules of routes.
 
+use std::cell::Cell;
+use std::hash::{BuildHasher, RandomState};
 use std::net::IpAddr;
 use std::sync::LazyLock;
 
@@ -162,17 +164,29 @@ pub(crate) fn set_forwarded(
     request.insert_header("X-Request-Id", id.as_str())
 }
 
-/// The ID of a request: 16 random bytes in lowercase hex, like `$request_id` of Nginx.
+/// The ID of a request: 128 unpredictable bits in lowercase hex, like `$request_id` of Nginx.
 pub(crate) struct RequestId([u8; 32]);
 
 impl RequestId {
-    /// Draws a new ID.
+    /// Draws a new ID: a keyed hash of a counter of the thread, taken twice for 128 bits. The
+    /// standard library draws the keys from the system once per thread, so that a request does
+    /// not wait for a system call, as it would with the generator of aws-lc.
     pub(crate) fn new() -> Self {
+        thread_local! {
+            static KEYS: RandomState = RandomState::new();
+            static COUNT: Cell<u64> = const { Cell::new(0) };
+        }
         const HEX: &[u8; 16] = b"0123456789abcdef";
+        let count = COUNT.with(|count| {
+            let current = count.get();
+            count.set(current.wrapping_add(1));
+            current
+        });
+        let (high, low) =
+            KEYS.with(|keys| (keys.hash_one((count, 0_u8)), keys.hash_one((count, 1_u8))));
         let mut bytes = [0; 16];
-        // The generator of aws-lc does not fail in practice; if it ever did, IDs of zeros would
-        // show it.
-        let _ = random().fill(&mut bytes);
+        bytes[..8].copy_from_slice(&high.to_le_bytes());
+        bytes[8..].copy_from_slice(&low.to_le_bytes());
         let mut hex = [0; 32];
         let (pairs, _) = hex.as_chunks_mut::<2>();
         for (pair, byte) in pairs.iter_mut().zip(bytes) {
@@ -273,5 +287,24 @@ mod tests {
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         );
         assert_ne!(first.as_str(), second.as_str());
+    }
+
+    /// IDs do not repeat within a thread, nor between threads, whose keys differ.
+    #[test]
+    fn request_ids_do_not_repeat() {
+        let draw = |count: usize| -> Vec<String> {
+            (0..count)
+                .map(|_| RequestId::new().as_str().to_owned())
+                .collect()
+        };
+        let mut seen: std::collections::HashSet<String> = draw(100_000).into_iter().collect();
+        assert_eq!(seen.len(), 100_000);
+        let threads: Vec<_> = (0..4)
+            .map(|_| std::thread::spawn(move || draw(20_000)))
+            .collect();
+        for thread in threads {
+            seen.extend(thread.join().unwrap());
+        }
+        assert_eq!(seen.len(), 180_000);
     }
 }
