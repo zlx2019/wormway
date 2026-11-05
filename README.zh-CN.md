@@ -34,6 +34,7 @@
 ## 开发
 
 依赖：Rust stable（MSRV 1.98）、[cargo-nextest](https://nexte.st/)、[cargo-deny](https://github.com/EmbarkStudios/cargo-deny)、[typos](https://github.com/crate-ci/typos) 和 [pre-commit](https://pre-commit.com/)。
+编译还需要 C 编译器、make 和 cmake（aws-lc、zlib-ng、jemalloc 要用）。`wormway` 默认用 jemalloc 作内存分配器，加 `--no-default-features` 则改用系统的。
 
 ```sh
 cargo fmt --all --check

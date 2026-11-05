@@ -8,7 +8,10 @@ license.workspace = true
 publish.workspace = true
 
 [features]
-# An allocator instead of the system's; jemalloc is the one when both are on.
+# The allocator: jemalloc by default, which took about a fifth less CPU than the system's in
+# benches/. Without default features the system's, or mimalloc with its feature; jemalloc is
+# the one when both are on.
+default = ["jemalloc"]
 jemalloc = ["dep:tikv-jemallocator"]
 mimalloc = ["dep:mimalloc"]
 

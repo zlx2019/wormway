@@ -49,7 +49,7 @@ both proxies. Both proxies leave their access logs off unless a scenario turns t
 A rate ladder stops at the first rate where the proxy falls more than 10% behind, p99 passes
 50 ms, or more than 1% of the requests fail.
 
-Then Wormway alone, against its defaults: the jemalloc and mimalloc allocators on scenarios 1,
+Then Wormway alone, against its defaults: the system and mimalloc allocators on scenarios 1,
 4 and 5; a backlog of 128 on scenario 3; the default pool of idle upstream connections against a
 pool of one per thread, both with 256 connections; upstreams over h2c and over HTTP/2 with TLS on
 scenario 1; and, with at least two CPUs for the proxy, one thread against several and

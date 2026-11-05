@@ -35,7 +35,13 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
 # Binaries of `build`, one per allocator; target/ is not committed.
 BINARIES = REPO / "target" / "bench"
-ALLOCATORS = ("system", "jemalloc", "mimalloc")
+# The allocators and the cargo flags that pick them; the first is that of the default build, the
+# one measured unless a variant says otherwise.
+ALLOCATORS = {
+    "jemalloc": [],
+    "system": ["--no-default-features"],
+    "mimalloc": ["--no-default-features", "--features", "mimalloc"],
+}
 
 # Ports on the loopback interface.
 HTTP_PORT = 8080  # the proxy under test, plain HTTP
@@ -937,7 +943,7 @@ def variants(run: Run, wormway: Proxy, scenarios: list[int]) -> None:
     that each needs: allocators on scenarios 1, 4 and 5; backlog 128 on scenario 3; the default
     pool of idle upstream connections against a pool of one per thread, both with 256
     connections; upstreams over HTTP/2; and with 4 CPUs or more, threads and reuseport."""
-    allocators = [name for name in ALLOCATORS[1:] if (BINARIES / f"wormway-{name}").exists()]
+    allocators = [name for name in list(ALLOCATORS)[1:] if (BINARIES / f"wormway-{name}").exists()]
     for name in allocators:
         numbers = [number for number in (1, 4, 5) if number in scenarios]
         if not numbers:
@@ -1010,8 +1016,9 @@ class Run:
 
 
 def wormway_binary(path: str | None) -> Path:
-    """The Wormway to measure: `path`, else the system build of `build`, else the release build."""
-    for candidate in (Path(path) if path else None, BINARIES / "wormway-system", REPO / "target/release/wormway"):
+    """The Wormway to measure: `path`, else the default build of `build`, else the release build."""
+    default = BINARIES / f"wormway-{next(iter(ALLOCATORS))}"
+    for candidate in (Path(path) if path else None, default, REPO / "target/release/wormway"):
         if candidate and candidate.exists():
             return candidate.resolve()
     sys.exit("no Wormway binary: run `bench.py build`, or give --wormway")
@@ -1082,8 +1089,7 @@ def parse_cpus(text: str) -> list[int]:
 def command_build(_: argparse.Namespace) -> None:
     """Builds the release binary once per allocator, into target/bench/."""
     BINARIES.mkdir(parents=True, exist_ok=True)
-    for name in ALLOCATORS:
-        features = [] if name == "system" else ["--features", name]
+    for name, features in ALLOCATORS.items():
         print(f"building with the {name} allocator", flush=True)
         built = subprocess.run(["cargo", "build", "--release", "--locked", "-p", "wormway", *features], cwd=REPO)
         if built.returncode != 0:
@@ -1293,7 +1299,7 @@ def main() -> None:
     run.add_argument("--proxies", default="wormway,nginx", help="wormway, nginx or both (default)")
     run.add_argument("--no-variants", dest="variants", action="store_false",
                      help="skip the variants of Wormway (allocators, backlog, pool, upstream HTTP/2)")
-    run.add_argument("--wormway", help="the binary to measure; default target/bench/wormway-system")
+    run.add_argument("--wormway", help="the binary to measure; default target/bench/wormway-jemalloc")
     run.add_argument("--warmup", type=float, default=5.0, help="seconds of warm-up before each run")
     run.add_argument("--duration", type=float, help="seconds of each run; 30, or 10 with --quick")
     run.add_argument("--repeats", type=int, help="runs of each measurement; 3, or 1 with --quick")

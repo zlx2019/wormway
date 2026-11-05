@@ -34,6 +34,7 @@ Out of scope for now: end-user proxy clients (TUN, system proxy, client-side rul
 ## Development
 
 Requirements: Rust stable (MSRV 1.98), [cargo-nextest](https://nexte.st/), [cargo-deny](https://github.com/EmbarkStudios/cargo-deny), [typos](https://github.com/crate-ci/typos) and [pre-commit](https://pre-commit.com/).
+Building also needs a C compiler, make and cmake, for aws-lc, zlib-ng and jemalloc. The `wormway` binary uses jemalloc as its allocator; `--no-default-features` builds it with the system's.
 
 ```sh
 cargo fmt --all --check

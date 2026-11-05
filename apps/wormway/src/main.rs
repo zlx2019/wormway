@@ -13,8 +13,8 @@ use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
 
-// Allocators to compare with the system's, see benches/. With both features on, as with
-// --all-features, jemalloc is the one.
+// jemalloc by default, see benches/; without default features the system's allocator, or
+// mimalloc with its feature. With both features on, as with --all-features, jemalloc is the one.
 #[cfg(feature = "jemalloc")]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
