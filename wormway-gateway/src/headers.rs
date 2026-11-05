@@ -7,7 +7,7 @@ use std::net::IpAddr;
 use std::sync::LazyLock;
 
 use http::{HeaderName, HeaderValue};
-use pingora::http::{RequestHeader, ResponseHeader};
+use pingora::http::{CasedHeaderName, RequestHeader, ResponseHeader};
 use rustls::crypto::SecureRandom;
 use wormway_core::config::{self, HeaderRules};
 
@@ -42,6 +42,11 @@ impl HeaderEdits {
             set: pairs(&rules.set)?,
             add: pairs(&rules.add)?,
         })
+    }
+
+    /// How many headers the changes add at most.
+    pub(crate) fn added(&self) -> usize {
+        self.set.len() + self.add.len()
     }
 
     /// Makes the changes to `headers`: removes, then sets, then adds.
@@ -116,6 +121,19 @@ impl EditHeaders for ResponseHeader {
     }
 }
 
+/// The headers that [`set_forwarded`] sets, parsed once rather than for every request.
+static X_FORWARDED_FOR: CasedHeaderName =
+    CasedHeaderName::from_static("x-forwarded-for", "X-Forwarded-For");
+static X_REAL_IP: CasedHeaderName = CasedHeaderName::from_static("x-real-ip", "X-Real-IP");
+static X_FORWARDED_PROTO: CasedHeaderName =
+    CasedHeaderName::from_static("x-forwarded-proto", "X-Forwarded-Proto");
+static X_FORWARDED_HOST: CasedHeaderName =
+    CasedHeaderName::from_static("x-forwarded-host", "X-Forwarded-Host");
+static X_CONSUMER: CasedHeaderName = CasedHeaderName::from_static("x-consumer", "X-Consumer");
+static X_REQUEST_ID: CasedHeaderName = CasedHeaderName::from_static("x-request-id", "X-Request-Id");
+/// How many headers [`set_forwarded`] adds at most.
+pub(crate) const FORWARDED_HEADERS: usize = 6;
+
 /// Sets the headers that tell the upstream about the client, replacing those the client sent,
 /// which nothing vouches for: `X-Forwarded-For` and `X-Real-IP` with the address of `client`,
 /// `X-Forwarded-Proto` with `https` if the listener has TLS, `X-Forwarded-Host` with the host
@@ -132,15 +150,16 @@ pub(crate) fn set_forwarded(
         Some(ip) => {
             // A client of a dual-stack socket shows up as an IPv4-mapped IPv6 address.
             let ip = ip.to_canonical().to_string();
-            request.insert_header("X-Forwarded-For", ip.as_str())?;
-            request.insert_header("X-Real-IP", ip)?;
+            request.insert_header(&X_FORWARDED_FOR, ip.as_str())?;
+            request.insert_header(&X_REAL_IP, ip)?;
         }
         None => {
-            request.remove_header("x-forwarded-for");
-            request.remove_header("x-real-ip");
+            request.remove_header(X_FORWARDED_FOR.name());
+            request.remove_header(X_REAL_IP.name());
         }
     }
-    request.insert_header("X-Forwarded-Proto", if tls { "https" } else { "http" })?;
+    let proto = if tls { "https" } else { "http" };
+    request.insert_header(&X_FORWARDED_PROTO, HeaderValue::from_static(proto))?;
     // The Host header, or the authority of an HTTP/2 request that has none.
     let host = match request.headers.get(http::header::HOST) {
         Some(host) => Some(host.clone()),
@@ -150,18 +169,18 @@ pub(crate) fn set_forwarded(
             .and_then(|authority| HeaderValue::from_str(authority.as_str()).ok()),
     };
     match host {
-        Some(host) => request.insert_header("X-Forwarded-Host", host)?,
+        Some(host) => request.insert_header(&X_FORWARDED_HOST, host)?,
         None => {
-            request.remove_header("x-forwarded-host");
+            request.remove_header(X_FORWARDED_HOST.name());
         }
     }
     match consumer {
-        Some(consumer) => request.insert_header("X-Consumer", consumer)?,
+        Some(consumer) => request.insert_header(&X_CONSUMER, consumer)?,
         None => {
-            request.remove_header("x-consumer");
+            request.remove_header(X_CONSUMER.name());
         }
     }
-    request.insert_header("X-Request-Id", id.as_str())
+    request.insert_header(&X_REQUEST_ID, id.as_str())
 }
 
 /// The ID of a request: 128 unpredictable bits in lowercase hex, like `$request_id` of Nginx.

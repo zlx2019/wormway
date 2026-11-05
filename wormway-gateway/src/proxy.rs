@@ -474,6 +474,12 @@ impl ProxyHttp for Proxy {
             .and_then(|addr| addr.as_inet())
             .map(|addr| addr.ip());
         let consumer = ctx.consumer.as_deref();
+        // Room for every header added below at once, rather than growing the maps for some.
+        let added = ctx
+            .route
+            .as_ref()
+            .map_or(0, |route| route.request_headers.added());
+        upstream_request.reserve(headers::FORWARDED_HEADERS + added)?;
         headers::set_forwarded(
             upstream_request,
             client,
