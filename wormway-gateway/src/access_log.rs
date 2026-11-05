@@ -1,5 +1,6 @@
 //! The access log: one line per request, as JSON or in the combined log format, written by a
-//! thread of its own so that requests never wait for the output.
+//! thread of its own so that requests never wait for the output. Under load the thread writes
+//! the lines in batches, so that requests do not wake it for each line.
 
 use std::fmt::Write as _;
 use std::fs::{File, OpenOptions};
@@ -9,15 +10,21 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use wormway_core::config::{AccessLogFormat, AccessLogSettings, Name};
 use wormway_core::time::{Fraction, LogTime};
 
 /// Lines that may wait for the writer; more are dropped and counted.
 const QUEUE: usize = 8192;
+/// How long a busy writer gathers lines before writing them.
+const BATCH: Duration = Duration::from_millis(20);
 /// How often an idle writer looks whether it should open the file again.
 const IDLE: Duration = Duration::from_secs(1);
+/// Bytes of lines buffered before they are written.
+const BUFFER: usize = 64 * 1024;
+/// How long closing the log waits for the writer.
+const CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 /// Lines the writer could not keep up with.
 const DROPPED_TOTAL: &str = "wormway_access_log_dropped_total";
 
@@ -26,9 +33,21 @@ const DROPPED_TOTAL: &str = "wormway_access_log_dropped_total";
 #[derive(Clone)]
 pub struct AccessLog {
     /// Requests waiting for the writer.
-    queue: SyncSender<Record>,
+    queue: SyncSender<Entry>,
     /// Asks the writer to open the file again.
     reopen: Arc<AtomicBool>,
+}
+
+/// What the writer takes from the queue.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "nearly every entry is a line; boxing it would cost every request an allocation"
+)]
+enum Entry {
+    /// The record of a request.
+    Line(Record),
+    /// A request to write out every line before it, answered on the sender.
+    Close(SyncSender<()>),
 }
 
 impl AccessLog {
@@ -64,10 +83,30 @@ impl AccessLog {
     /// Hands `record` to the writer, or drops and counts it when the writer is behind.
     pub(crate) fn write(&self, record: Record) {
         if let Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) =
-            self.queue.try_send(record)
+            self.queue.try_send(Entry::Line(record))
         {
             metrics::counter!(DROPPED_TOTAL).increment(1);
         }
+    }
+
+    /// Waits, up to a second, until the lines handed over so far are written, so that none is
+    /// lost when the process exits. Lines handed over later are still written.
+    pub fn close(&self) {
+        let deadline = Instant::now() + CLOSE_TIMEOUT;
+        let (done, written) = mpsc::sync_channel(1);
+        let mut entry = Entry::Close(done);
+        // The queue may be full for a moment; the writer empties it within a batch.
+        loop {
+            match self.queue.try_send(entry) {
+                Ok(()) => break,
+                Err(TrySendError::Full(back)) if Instant::now() < deadline => {
+                    entry = back;
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => return,
+            }
+        }
+        let _ = written.recv_timeout(deadline.saturating_duration_since(Instant::now()));
     }
 }
 
@@ -293,26 +332,54 @@ struct Writer {
 }
 
 impl Writer {
-    /// Writes the records of `waiting` until every handle of the log is dropped, flushing
-    /// whenever no more are waiting.
-    fn run(mut self, waiting: Receiver<Record>) {
+    /// Writes the entries of `waiting` until every handle of the log is dropped. While lines
+    /// keep coming, it writes what came every [`BATCH`] instead of waiting for the next line, so
+    /// that requests need not wake it; once a whole batch brings nothing, it waits again.
+    fn run(mut self, waiting: Receiver<Entry>) {
         let mut line = String::new();
         loop {
-            match waiting.recv_timeout(IDLE) {
-                Ok(record) => {
-                    self.write(&record, &mut line);
-                    while let Ok(record) = waiting.try_recv() {
-                        self.write(&record, &mut line);
-                    }
-                    let flushed = self.output.flush();
-                    self.outcome(flushed);
+            let first = match waiting.recv_timeout(IDLE) {
+                Ok(entry) => entry,
+                Err(RecvTimeoutError::Timeout) => {
+                    self.reopen_if_asked();
+                    continue;
                 }
-                Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => return,
+            };
+            let mut next = Some(first);
+            loop {
+                let mut taken = 0;
+                while let Some(entry) = next.take().or_else(|| waiting.try_recv().ok()) {
+                    self.take(entry, &mut line);
+                    taken += 1;
+                }
+                let flushed = self.output.flush();
+                self.outcome(flushed);
+                self.reopen_if_asked();
+                if taken == 0 {
+                    break;
+                }
+                std::thread::sleep(BATCH);
             }
-            if self.reopen.swap(false, Ordering::Relaxed) {
-                self.output.reopen();
+        }
+    }
+
+    /// Writes the line of a record, or answers a close once the lines before it are out.
+    fn take(&mut self, entry: Entry, line: &mut String) {
+        match entry {
+            Entry::Line(record) => self.write(&record, line),
+            Entry::Close(done) => {
+                let flushed = self.output.flush();
+                self.outcome(flushed);
+                let _ = done.try_send(());
             }
+        }
+    }
+
+    /// Opens the file again if that was asked for.
+    fn reopen_if_asked(&mut self) {
+        if self.reopen.swap(false, Ordering::Relaxed) {
+            self.output.reopen();
         }
     }
 
@@ -373,10 +440,10 @@ impl Output {
                 })?;
                 Ok(Self::File {
                     path,
-                    file: BufWriter::new(file),
+                    file: BufWriter::with_capacity(BUFFER, file),
                 })
             }
-            None => Ok(Self::Stdout(BufWriter::new(io::stdout()))),
+            None => Ok(Self::Stdout(BufWriter::with_capacity(BUFFER, io::stdout()))),
         }
     }
 
@@ -405,7 +472,7 @@ impl Output {
             tracing::warn!(path = %path.display(), "cannot write the access log: {error}");
         }
         match open_file(path) {
-            Ok(opened) => *file = BufWriter::new(opened),
+            Ok(opened) => *file = BufWriter::with_capacity(BUFFER, opened),
             Err(error) => tracing::error!(
                 path = %path.display(),
                 "cannot open the access log again: {error}; lines keep going to the file open before"
@@ -524,6 +591,23 @@ mod tests {
         log.write(record());
         wait_for_lines(&path, 1);
         assert_eq!(line_count(&moved), 1);
+    }
+
+    /// Once `close` returns, every line handed over before it is in the file, although the writer
+    /// writes in batches.
+    #[test]
+    fn writes_every_line_before_closing() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = AccessLogSettings {
+            format: AccessLogFormat::Combined,
+            path: Some(PathBuf::from("access.log")),
+        };
+        let log = AccessLog::open(&settings, LogTime::default(), dir.path()).unwrap();
+        for _ in 0..1000 {
+            log.write(record());
+        }
+        log.close();
+        assert_eq!(line_count(&dir.path().join("access.log")), 1000);
     }
 
     /// Returns the number of lines in the file at `path`, 0 if it does not exist.

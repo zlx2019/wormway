@@ -83,12 +83,17 @@ pub fn run(path: &Path) -> anyhow::Result<ExitCode> {
     };
 
     let data_plane = data_plane(setup.config.server.threads)?;
+    let access_log = setup.access_log.clone();
     // Signals, reloads and the Admin API run on their own small runtime, away from the
     // connections.
     let control_plane = Builder::new_current_thread().enable_all().build()?;
     let exit = control_plane.block_on(serve(setup, data_plane.handle().clone()));
     // Connections have finished or were closed by now; do not wait for anything left over.
     data_plane.shutdown_timeout(Duration::from_secs(1));
+    // The lines of the last requests may still wait for the writer of the access log.
+    if let Some(access_log) = access_log {
+        access_log.close();
+    }
     exit
 }
 
