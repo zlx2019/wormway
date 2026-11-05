@@ -13,6 +13,7 @@ use crate::auth::{Authentication, Consumers};
 use crate::headers::HeaderEdits;
 use crate::limit::RateLimiter;
 use crate::stats::Window;
+use crate::telemetry::RequestMetrics;
 use crate::upstream::CompiledUpstream;
 
 /// A route ready to serve requests.
@@ -46,6 +47,8 @@ pub(crate) struct CompiledRoute {
     pub(crate) max_body_size: Option<u64>,
     /// The authentication, if the route asks for one.
     pub(crate) auth: Option<Authentication>,
+    /// The request metrics, one for each listener of the route.
+    metrics: Box<[RequestMetrics]>,
 }
 
 /// What a route does with a request.
@@ -59,13 +62,15 @@ pub(crate) enum Handler {
 }
 
 impl CompiledRoute {
-    /// Compiles route `name`, with its upstream from `upstreams` and its authentication with
-    /// `consumers`. It keeps the traffic and the requests in progress of `running`, the route of
-    /// the same name in effect, and its rate limit if the settings are the same. The route
-    /// passed validation, so this fails only if the validation rules miss a case.
+    /// Compiles route `name` of `listeners`, with its upstream from `upstreams` and its
+    /// authentication with `consumers`. It keeps the traffic and the requests in progress of
+    /// `running`, the route of the same name in effect, and its rate limit if the settings are
+    /// the same. The route passed validation, so this fails only if the validation rules miss a
+    /// case.
     pub(crate) fn new(
         name: &Name,
         route: &Route,
+        listeners: &[&Name],
         upstreams: &BTreeMap<Name, Arc<CompiledUpstream>>,
         consumers: &Arc<Consumers>,
         running: Option<&CompiledRoute>,
@@ -120,7 +125,18 @@ impl CompiledRoute {
             inflight: running.map_or_else(Arc::default, |running| running.inflight.clone()),
             max_body_size: route.max_body_size.map(ByteSize::bytes),
             auth,
+            metrics: listeners
+                .iter()
+                .map(|listener| RequestMetrics::new((*listener).clone(), Some(name.clone())))
+                .collect(),
         })
+    }
+
+    /// Returns the request metrics of the route on `listener`, if the route is on it.
+    pub(crate) fn metrics(&self, listener: &Name) -> Option<&RequestMetrics> {
+        self.metrics
+            .iter()
+            .find(|metrics| metrics.listener() == listener)
     }
 
     /// Returns the upstream of a route that forwards requests.

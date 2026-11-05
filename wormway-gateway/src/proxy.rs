@@ -26,8 +26,9 @@ use crate::limit::{self, Key};
 use crate::probe::describe;
 use crate::route::{CompiledRoute, FixedResponse, Handler, RedirectTarget};
 use crate::snapshot::GatewaySnapshot;
+use crate::stats;
+use crate::telemetry::{self, RequestMetrics};
 use crate::upstream::{CompiledUpstream, Inflight};
-use crate::{stats, telemetry};
 
 /// Where HTTP-01 challenges of ACME ask for the answer to a token.
 const CHALLENGE_PATH: &str = "/.well-known/acme-challenge/";
@@ -47,6 +48,8 @@ pub(crate) struct Proxy {
     access_log: Option<AccessLog>,
     /// The answers to the HTTP-01 challenges of ACME in progress.
     challenges: Challenges,
+    /// The metrics of the requests that match no route.
+    unrouted: RequestMetrics,
 }
 
 /// State of one request.
@@ -102,6 +105,7 @@ impl Proxy {
         challenges: Challenges,
     ) -> Self {
         Self {
+            unrouted: RequestMetrics::new(listener.clone(), None),
             listener,
             snapshot,
             keepalive,
@@ -297,7 +301,7 @@ impl ProxyHttp for Proxy {
             return e;
         };
         upstream.runtime.failed(target, &e);
-        telemetry::attempt(upstream.name(), attempt_result(Some(&e)));
+        upstream.attempts.record(attempt_result(Some(&e)));
         ctx.counted = true;
         if ctx.retries >= upstream.retries() {
             return e;
@@ -420,17 +424,20 @@ impl ProxyHttp for Proxy {
             self.log_failure(error, ctx, status);
         }
         let route = ctx.route.as_ref();
-        telemetry::request(
-            &self.listener,
-            route.map(|route| &route.name),
-            status,
-            duration,
-        );
+        match route {
+            Some(route) => match route.metrics(&self.listener) {
+                Some(metrics) => metrics.record(status, duration),
+                // Not expected: the router of a listener holds only the routes on it.
+                None => RequestMetrics::new(self.listener.clone(), Some(route.name.clone()))
+                    .record(status, duration),
+            },
+            None => self.unrouted.record(status, duration),
+        }
         if !ctx.counted
             && !ctx.tried.is_empty()
             && let Some(upstream) = route.and_then(|route| route.upstream())
         {
-            telemetry::attempt(upstream.name(), attempt_result(error));
+            upstream.attempts.record(attempt_result(error));
         }
         count_traffic(ctx, status, duration);
         if let Some(access_log) = &self.access_log

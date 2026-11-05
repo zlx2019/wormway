@@ -1,9 +1,10 @@
 //! Metrics of the requests and of the attempts at the targets of the upstreams. They go to the
 //! process-wide recorder, if one is installed.
 
+use std::sync::OnceLock;
 use std::time::Duration;
 
-use metrics::{counter, describe_counter, describe_histogram, histogram};
+use metrics::{Counter, Histogram, counter, describe_counter, describe_histogram, histogram};
 use wormway_core::config::Name;
 
 /// Requests that ended, by listener, route and status.
@@ -35,25 +36,101 @@ pub(crate) fn describe() {
     );
 }
 
-/// Counts a request of `listener` that ended with `status` after `duration`. `route` is `None`
-/// for requests that matched no route.
-pub(crate) fn request(listener: &Name, route: Option<&Name>, status: u16, duration: Duration) {
-    let route = route.map(Name::to_string).unwrap_or_default();
-    counter!(
-        REQUESTS_TOTAL,
-        "listener" => listener.to_string(),
-        "route" => route.clone(),
-        "status" => status.to_string()
-    )
-    .increment(1);
-    histogram!(REQUEST_DURATION, "route" => route).record(duration.as_secs_f64());
+/// Statuses whose counters [`RequestMetrics`] keeps, in order; the others are looked up in the
+/// registry for every request.
+const KEPT_STATUSES: [u16; 22] = [
+    200, 201, 204, 206, 301, 302, 304, 307, 308, 400, 401, 403, 404, 405, 408, 413, 429, 499, 500,
+    502, 503, 504,
+];
+/// Results of the attempts at targets.
+const RESULTS: [&str; 3] = ["ok", "timeout", "error"];
+
+/// The request metrics of one route, or of the requests that matched no route, on one listener.
+/// It keeps the handles it takes from the registry, so that counting a request neither looks
+/// them up nor allocates their labels again.
+pub(crate) struct RequestMetrics {
+    /// The listener.
+    listener: Name,
+    /// The route, `None` for the requests that matched none.
+    route: Option<Name>,
+    /// Counters of the requests, by status in [`KEPT_STATUSES`].
+    requests: [OnceLock<Counter>; KEPT_STATUSES.len()],
+    /// Time to the end of the response.
+    duration: OnceLock<Histogram>,
 }
 
-/// Counts an attempt at a target of `upstream` that ended with `result`: `ok`, `timeout` or
-/// `error`.
-pub(crate) fn attempt(upstream: &Name, result: &'static str) {
-    counter!(UPSTREAM_REQUESTS_TOTAL, "upstream" => upstream.to_string(), "result" => result)
-        .increment(1);
+impl RequestMetrics {
+    /// The metrics of `route` on `listener`; `route` is `None` for the requests that matched no
+    /// route.
+    pub(crate) fn new(listener: Name, route: Option<Name>) -> Self {
+        Self {
+            listener,
+            route,
+            requests: [const { OnceLock::new() }; KEPT_STATUSES.len()],
+            duration: OnceLock::new(),
+        }
+    }
+
+    /// Returns the listener.
+    pub(crate) fn listener(&self) -> &Name {
+        &self.listener
+    }
+
+    /// Counts a request that ended with `status` after `duration`.
+    pub(crate) fn record(&self, status: u16, duration: Duration) {
+        match KEPT_STATUSES.binary_search(&status) {
+            Ok(index) => self.requests[index]
+                .get_or_init(|| self.requests(status))
+                .increment(1),
+            Err(_) => self.requests(status).increment(1),
+        }
+        self.duration
+            .get_or_init(|| histogram!(REQUEST_DURATION, "route" => self.route_label()))
+            .record(duration.as_secs_f64());
+    }
+
+    /// Looks up the counter of the requests that ended with `status`.
+    fn requests(&self, status: u16) -> Counter {
+        counter!(
+            REQUESTS_TOTAL,
+            "listener" => self.listener.to_string(),
+            "route" => self.route_label(),
+            "status" => status.to_string()
+        )
+    }
+
+    /// Returns the label of the route: empty for the requests that matched none.
+    fn route_label(&self) -> String {
+        self.route.as_ref().map(Name::to_string).unwrap_or_default()
+    }
+}
+
+/// The metrics of the attempts at the targets of one upstream, which keep their handles as
+/// [`RequestMetrics`] does.
+pub(crate) struct AttemptMetrics {
+    /// The upstream.
+    upstream: Name,
+    /// Counters of the attempts, by result in [`RESULTS`].
+    attempts: [OnceLock<Counter>; RESULTS.len()],
+}
+
+impl AttemptMetrics {
+    /// The metrics of the attempts at the targets of `upstream`.
+    pub(crate) fn new(upstream: Name) -> Self {
+        Self {
+            upstream,
+            attempts: [const { OnceLock::new() }; RESULTS.len()],
+        }
+    }
+
+    /// Counts an attempt that ended with `result`: `ok`, `timeout` or `error`.
+    pub(crate) fn record(&self, result: &'static str) {
+        let attempts = || counter!(UPSTREAM_REQUESTS_TOTAL, "upstream" => self.upstream.to_string(), "result" => result);
+        match RESULTS.iter().position(|known| *known == result) {
+            Some(index) => self.attempts[index].get_or_init(attempts).increment(1),
+            None => attempts().increment(1),
+        }
+    }
 }
 
 /// Counts a request of `route` that its rate limit turned away.

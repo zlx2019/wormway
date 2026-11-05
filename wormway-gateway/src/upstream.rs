@@ -24,6 +24,7 @@ use wormway_runtime::{TargetReport, TargetState, UpstreamReport};
 
 use crate::health::{UpstreamHealth, Watch};
 use crate::stats::Window;
+use crate::telemetry::AttemptMetrics;
 use crate::upstream_tls::PeerTls;
 
 /// How many targets a selection may look at before it gives up.
@@ -51,6 +52,8 @@ pub(crate) struct CompiledUpstream {
     connect: Arc<Connect>,
     /// The traffic of the routes to the upstream, kept while the upstream keeps its name.
     pub(crate) stats: Arc<Window>,
+    /// The metrics of the attempts at the targets.
+    pub(crate) attempts: AttemptMetrics,
 }
 
 impl CompiledUpstream {
@@ -63,6 +66,7 @@ impl CompiledUpstream {
         stats: Arc<Window>,
     ) -> Self {
         Self {
+            attempts: AttemptMetrics::new(runtime.name.clone()),
             runtime,
             hash_key: (upstream.balance() == Balance::ConsistentHash).then(|| upstream.hash_key()),
             timeouts: upstream.timeouts,

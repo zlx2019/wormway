@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use wormway_core::config::{Config, HealthCheckKind, Issue, Name, Protocol, Upstream};
+use wormway_core::config::{Config, HealthCheckKind, Issue, Name, Protocol, Route, Upstream};
 use wormway_core::routing::{Request, Router};
 use wormway_runtime::{BoxFuture, Engine, HealthReport, Staged, UpstreamReport};
 use wormway_tls::Certificates;
@@ -119,10 +119,21 @@ impl GatewaySnapshot {
             }
         };
 
+        let http_listeners: Vec<&Name> = config
+            .listeners
+            .iter()
+            .filter(|(_, listener)| listener.protocol == Protocol::Http)
+            .map(|(name, _)| name)
+            .collect();
         let mut routes = Vec::new();
         for (name, route) in &config.routes {
             let running = self.routes.get(name).map(|running| &**running);
-            match CompiledRoute::new(name, route, &upstreams, &consumers, running) {
+            let listeners: Vec<&Name> = http_listeners
+                .iter()
+                .copied()
+                .filter(|listener| on_listener(route, listener))
+                .collect();
+            match CompiledRoute::new(name, route, &listeners, &upstreams, &consumers, running) {
                 Ok(compiled) => routes.push((route, Arc::new(compiled))),
                 Err(issue) => issues.push(issue),
             }
@@ -130,14 +141,12 @@ impl GatewaySnapshot {
         if !issues.is_empty() {
             return Err(issues);
         }
-        let routers = config
-            .listeners
-            .iter()
-            .filter(|(_, listener)| listener.protocol == Protocol::Http)
-            .map(|(listener, _)| {
-                let own = routes.iter().filter(|(route, _)| {
-                    route.listeners.is_empty() || route.listeners.contains(listener)
-                });
+        let routers = http_listeners
+            .into_iter()
+            .map(|listener| {
+                let own = routes
+                    .iter()
+                    .filter(|(route, _)| on_listener(route, listener));
                 let router = Router::new(own.map(|(route, compiled)| (*route, compiled.clone())));
                 (listener.clone(), router)
             })
@@ -196,6 +205,12 @@ impl GatewaySnapshot {
             .await
             .map_err(|problems| target_issues(name, problems))
     }
+}
+
+/// Whether `route` sees the requests of HTTP listener `listener`: those of every HTTP listener
+/// unless it names some.
+fn on_listener(route: &Route, listener: &Name) -> bool {
+    route.listeners.is_empty() || route.listeners.contains(listener)
 }
 
 /// Returns the problems with the targets of upstream `name`, which come with the index of
