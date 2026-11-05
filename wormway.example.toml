@@ -7,7 +7,8 @@ version = 1
 # ---- Static settings: a restart applies changes ----
 
 [server]
-threads = 0                 # data-plane worker threads, 0 = one per CPU core
+threads = 0                 # data-plane worker threads, 0 = one per CPU core; fewer use less CPU
+                            # per request at moderate load, more reach a higher peak
 shutdown_timeout = "30s"    # how long open connections may take to finish on shutdown
 backlog = 4096              # connections each listening socket holds until accepted; the system
                             # caps it, on Linux at net.core.somaxconn

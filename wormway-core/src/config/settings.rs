@@ -13,7 +13,11 @@ use super::{Duration, TimeFormat};
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default, deny_unknown_fields)]
 pub struct ServerSettings {
-    /// Worker threads of the data plane. `0` starts one per CPU core.
+    /// Worker threads of the data plane. `0` starts one per CPU core. Fewer threads use less CPU
+    /// per request when the load is moderate, because each then sleeps and wakes up less often:
+    /// with simultaneous multithreading (hyper-threading), one thread per physical core instead
+    /// of one per hardware thread used about a third less CPU at moderate rates in Wormway's
+    /// benchmarks, at the cost of a lower peak throughput.
     pub threads: usize,
     /// How long open connections may take to finish when Wormway shuts down or their listener is
     /// changed or removed. Connections still open after that are closed.

@@ -1274,7 +1274,7 @@
         },
         "threads": {
           "default": 0,
-          "description": "Worker threads of the data plane. `0` starts one per CPU core.",
+          "description": "Worker threads of the data plane. `0` starts one per CPU core. Fewer threads use less CPU\nper request when the load is moderate, because each then sleeps and wakes up less often:\nwith simultaneous multithreading (hyper-threading), one thread per physical core instead\nof one per hardware thread used about a third less CPU at moderate rates in Wormway's\nbenchmarks, at the cost of a lower peak throughput.",
           "format": "uint",
           "minimum": 0,
           "type": "integer"
