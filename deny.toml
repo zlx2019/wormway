@@ -21,14 +21,6 @@ ignore = [
     # unsafe-libyaml is unmaintained; it reads Pingora's YAML configuration, which Wormway never
     # loads.
     { id = "RUSTSEC-2024-0449", reason = "pulled in by Pingora, Wormway reads no YAML" },
-    # Flaws of zstd 0.13, fixed in zstd 0.14 and zstd-safe 8, which Pingora 0.9.0 does not accept.
-    # Wormway reaches zstd only when routes with compress = true answer clients that ask for zstd:
-    # Pingora then compresses with a new encoder for each response. The flaws lie in reused
-    # contexts, seekable archives and streaming decompression, which that never touches. Pingora's
-    # HTTP cache uses zstd too; enabling it requires a Pingora release with the fixed zstd first.
-    { id = "RUSTSEC-2026-0391", reason = "Wormway's compression makes a new zstd context for each response" },
-    { id = "RUSTSEC-2026-0398", reason = "seekable zstd archives, which Wormway does not read" },
-    { id = "RUSTSEC-2026-0403", reason = "zstd decompression, which Wormway does not do" },
 ]
 
 [licenses]
@@ -63,3 +55,5 @@ highlight = "all"
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
+# The fork of Pingora that Wormway builds on until its changes are released upstream.
+allow-git = ["https://github.com/zlx2019/pingora"]
