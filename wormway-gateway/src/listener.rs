@@ -169,7 +169,9 @@ impl Service for HttpService {
                 },
                 None => Box::new(stream),
                 Some(acceptor) => {
-                    let handshake = acceptor.tls_handshake(stream);
+                    // Boxed: the handshake needs several KiB, which this future would otherwise
+                    // hold for as long as the connection lasts.
+                    let handshake = Box::pin(acceptor.tls_handshake(stream));
                     match tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake).await {
                         Ok(Ok(tls)) => Box::new(tls),
                         Ok(Err(error)) => {
