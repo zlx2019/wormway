@@ -45,6 +45,7 @@ both proxies. Both proxies leave their access logs off unless a scenario turns t
 | 6 | One of two upstream targets stops for 15 seconds | 2000 per second for 40 seconds; Wormway with passive checks and `retry_on_reset`, Nginx with `max_fails`, which retries on the other target by default |
 | 7 | Features turned on one by one: request headers, rate limit, API key, JSON and combined access logs, all | 5000 and 10000 per second |
 | 8 | A configuration change every second, SIGHUP for both | 5000 per second for 40 seconds, against the same load without changes |
+| 9 | Where the CPU time goes, with `perf`: counters per request, then sampled call stacks | 10000 per second as in scenario 1, with one thread or worker and with one per CPU; skipped without `perf` |
 
 A rate ladder stops at the first rate where the proxy falls more than 10% behind, p99 passes
 50 ms, or more than 1% of the requests fail.
@@ -59,6 +60,12 @@ What each run records: oha's latency report, the CPU time and the resident memor
 (with its worker processes for Nginx), the connections that the kernel dropped from full accept
 queues (`/proc/net/netstat`), and the requests per upstream connection (`stub_status` of the
 upstream).
+
+Scenario 9 adds what `perf stat` counted (`stat.csv`; virtual machines often lack the hardware
+counters, cycles and instructions), the functions with the most samples of their own
+(`self.txt`), and every sampled call stack in the folded format of flame graphs
+(`stacks.folded`). Nginx from nginx.org ships without symbols, so most of its own functions show
+up as addresses.
 
 ## On a Debian or Ubuntu server
 
@@ -83,6 +90,14 @@ for ARM), and Rust:
 sudo curl -L -o /usr/local/bin/oha https://github.com/hatoo/oha/releases/latest/download/oha-linux-amd64
 sudo chmod +x /usr/local/bin/oha
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+For scenario 9, install `perf`, and let it sample the kernel too and name its functions, until
+the next reboot:
+
+```sh
+sudo apt install linux-tools-common linux-tools-$(uname -r)
+sudo sysctl kernel.perf_event_paranoid=1 kernel.kptr_restrict=0
 ```
 
 Build Wormway once per allocator, into `target/bench/`. The release profile links the whole

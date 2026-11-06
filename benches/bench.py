@@ -933,8 +933,115 @@ def scenario_8(proxy: Proxy, run: Run) -> None:
             record.write_text(json.dumps(result, indent=1))
 
 
+# What perf stat counts in scenario 9. Virtual machines often lack the hardware counters, cycles
+# and instructions, which perf then reports as not supported.
+PERF_EVENTS = "task-clock,context-switches,cpu-migrations,page-faults,cycles,instructions"
+# Samples a second of each CPU that perf record takes: few enough for its DWARF call graphs.
+PERF_FREQUENCY = 499
+
+
+def perf_problem() -> str | None:
+    """Why perf cannot profile the proxy, or None if it can."""
+    if shutil.which("perf") is None:
+        return "perf is not installed; see benches/README.md"
+    paranoid = int(Path("/proc/sys/kernel/perf_event_paranoid").read_text())
+    if paranoid > 1 and os.geteuid() != 0:
+        return (f"kernel.perf_event_paranoid is {paranoid}; allow perf first with "
+                "`sudo sysctl kernel.perf_event_paranoid=1 kernel.kptr_restrict=0`")
+    return None
+
+
+def perf_during(proxy: Proxy, run: Run, arguments: list[str], log: Path, measured) -> None:
+    """Calls `measured` with perf attached to every process of the proxy, on the tool CPUs, and
+    stops perf after it, which then writes its output."""
+    pids = ",".join(map(str, process_tree(proxy.pid)))
+    perf = Process("perf", run.layout.pin(run.layout.tools, ["perf", *arguments, "-p", pids]), log)
+    time.sleep(1)
+    try:
+        measured()
+    finally:
+        perf.stop(signal.SIGINT, timeout=300)
+
+
+def fold_stacks(data: Path, folded: Path) -> None:
+    """Writes the stacks that perf recorded in `data` as the input of flame graphs: one line per
+    stack, its frames from the thread name down, then its samples."""
+    script = subprocess.Popen(["perf", "script", "-i", str(data), "-F", "comm,ip,sym"],
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, errors="replace")
+    assert script.stdout is not None
+    counts: dict[str, int] = {}
+    thread: str | None = None
+    frames: list[str] = []
+    for line in [*script.stdout, ""]:
+        if not line.strip():
+            if thread is not None:
+                stack = ";".join([thread, *reversed(frames)])
+                counts[stack] = counts.get(stack, 0) + 1
+            thread, frames = None, []
+        elif line[0].isspace():
+            # The address, then the function.
+            parts = line.split(None, 1)
+            frames.append(parts[1].strip() if len(parts) > 1 else "[unknown]")
+        else:
+            thread = line.strip().replace(" ", "_")
+    script.wait()
+    folded.write_text("".join(f"{stack} {count}\n" for stack, count in sorted(counts.items())))
+
+
+def scenario_9(proxy: Proxy, run: Run) -> None:
+    """Where the proxy spends its CPU time, with perf, at 10000 requests per second as in scenario 1."""
+    problem = perf_problem()
+    if problem:
+        print(f"    skipped: {problem}", flush=True)
+        return
+    # One thread or worker as well, where the cost of each request shows without that of
+    # sharing the work.
+    for threads in sorted({1, len(run.layout.proxy)}):
+        print(f"   {threads} thread{'s' if threads > 1 else ''}", flush=True)
+        settings = run.settings()
+        settings.threads = threads
+        profile(proxy, run, settings, run.out(9, proxy) / f"threads-{threads}")
+
+
+def profile(proxy: Proxy, run: Run, settings: Settings, out: Path) -> None:
+    """Counts what the proxy with `settings` does per request with perf stat, then samples its
+    call stacks with perf record, and writes both to `out`."""
+    rate = 5000 if run.options.quick else 10000
+    out.mkdir(parents=True, exist_ok=True)
+    proxy.start(settings)
+    load = Load(f"{HTTP}/")
+    warm = run_oha(run.layout, load, rate, run.options.warmup, None)
+    warm.wait()
+    options = Options(warmup=0, duration=run.options.duration, repeats=1, quick=run.options.quick)
+
+    print(f"    {rate}/s, counting with perf stat", flush=True)
+    perf_during(proxy, run, ["stat", "-x", ",", "-e", PERF_EVENTS, "-o", str(out / "stat.csv")],
+                out / "perf-stat.log", lambda: measure(proxy, run.layout, load, rate, options, out / f"{rate}-1.json"))
+
+    print(f"    {rate}/s, sampling with perf record", flush=True)
+    data = run.work.path(f"perf-{proxy.kind}.data")
+    data.unlink(missing_ok=True)
+    sampled = out / "sampled"
+    sampled.mkdir(exist_ok=True)
+    perf_during(proxy, run, ["record", "-F", str(PERF_FREQUENCY), "--call-graph", "dwarf", "-o", str(data)],
+                out / "perf-record.log",
+                lambda: measure(proxy, run.layout, load, rate, options, sampled / f"{rate}-1.json"))
+    proxy.stop()
+    if not data.exists():
+        print(f"    perf record wrote nothing, see {out / 'perf-record.log'}", flush=True)
+        return
+
+    print("    reading the samples", flush=True)
+    with open(out / "self.txt", "w") as report:
+        subprocess.run(["perf", "report", "-i", str(data), "--stdio", "--no-children", "-g", "none",
+                        "--sort", "dso,symbol", "--percent-limit", "0.2"],
+                       stdout=report, stderr=subprocess.DEVNULL, check=False)
+    fold_stacks(data, out / "stacks.folded")
+    data.unlink()
+
+
 SCENARIOS = {1: scenario_1, 2: scenario_2, 3: scenario_3, 4: scenario_4, 5: scenario_5, 6: scenario_6,
-             7: scenario_7, 8: scenario_8}
+             7: scenario_7, 8: scenario_8, 9: scenario_9}
 
 
 # ---- Variants of Wormway alone ----
@@ -1165,6 +1272,8 @@ def summarize(out: Path) -> str:
         lines += [f"## Scenario {number}: {SCENARIOS[number].__doc__.splitlines()[0]}", ""]
         if number == 5:
             lines += memory_table(scenario)
+        elif number == 9:
+            lines += profile_table(scenario)
         else:
             lines += load_table(scenario, number)
         lines.append("")
@@ -1224,6 +1333,54 @@ def memory_table(scenario: Path) -> list[str]:
                     f"{statistics.median(r['held_rss_bytes'] for r in results) / (1 << 20):.1f} | "
                     f"{(statistics.median(per) / 1024) if per else float('nan'):.1f} |")
     return rows
+
+
+def perf_counts(stat: Path) -> dict[str, float]:
+    """The counts in the CSV output of perf stat, by event; those it could not count are left out."""
+    counts = {}
+    for line in stat.read_text().splitlines():
+        fields = line.split(",")
+        if line.startswith("#") or len(fields) < 3:
+            continue
+        try:
+            counts[fields[2].split(":")[0]] = float(fields[0])
+        except ValueError:
+            pass  # <not supported> or <not counted>
+    return counts
+
+
+def profile_table(scenario: Path) -> list[str]:
+    """One row per proxy and thread count with what perf stat counted per request, then the
+    functions that perf record found running most often."""
+    rows = ["| proxy | requests | CPU µs | instructions | cycles | IPC | context switches | migrations | "
+            "page faults |", "|---|---|---|---|---|---|---|---|---|"]
+    tops = []
+    for stat in sorted(scenario.rglob("stat.csv")):
+        directory = stat.parent
+        name = str(directory.relative_to(scenario))
+        record = next(directory.glob("*-1.json"), None)
+        if record is None:
+            continue
+        result = json.loads(record.read_text())
+        requests = outcome(result)[0] * result["wall_seconds"]
+        counts = perf_counts(stat)
+
+        def per(event: str, digits: int, scale: float = 1) -> str:
+            """The count of `event` per request with `digits` decimals, if perf counted it."""
+            return f"{counts[event] * scale / requests:,.{digits}f}" if event in counts and requests else "-"
+
+        ipc = "-"
+        if counts.get("cycles") and "instructions" in counts:
+            ipc = f"{counts['instructions'] / counts['cycles']:.2f}"
+        rows.append(f"| {name} | {requests:,.0f} | {per('task-clock', 1, 1000)} | "
+                    f"{per('instructions', 0)} | {per('cycles', 0)} | {ipc} | {per('context-switches', 3)} | "
+                    f"{per('cpu-migrations', 3)} | {per('page-faults', 3)} |")
+        report = directory / "self.txt"
+        if report.exists():
+            functions = [line for line in report.read_text(errors="replace").splitlines()
+                         if line.strip() and not line.startswith("#")]
+            tops += ["", f"Most samples in their own code, {name}:", "", "```", *functions[:15], "```"]
+    return rows + tops
 
 
 # ---- WebSocket helpers of scenario 5 ----

@@ -19,6 +19,7 @@ echo "nginx: $(version nginx -v)"
 echo "oha: $(version oha --version)"
 echo "python: $(version python3 --version)"
 echo "openssl: $(version openssl version)"
+echo "perf: $(version perf --version)"
 
 case "$(uname -s)" in
     Linux)
@@ -29,7 +30,7 @@ case "$(uname -s)" in
         echo "swap: $(free -h | awk '/^Swap:/ {print $2}')"
         echo "transparent huge pages: $(cat /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null || echo unknown)"
         for key in net.core.somaxconn net.ipv4.tcp_max_syn_backlog net.ipv4.ip_local_port_range \
-            net.ipv4.tcp_tw_reuse; do
+            net.ipv4.tcp_tw_reuse kernel.perf_event_paranoid kernel.kptr_restrict; do
             echo "$key: $(sysctl -n "$key" 2>/dev/null | tr '\t' ' ' || echo unknown)"
         done
         ;;
