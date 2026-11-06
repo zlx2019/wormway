@@ -48,6 +48,9 @@ pub(crate) struct CompiledUpstream {
     timeouts: Timeouts,
     /// How many other targets a request tries when it cannot connect.
     retries: u32,
+    /// Whether idempotent requests whose new connection was closed or reset before the response
+    /// header try another target too.
+    retry_on_reset: bool,
     /// How requests reach the targets.
     connect: Arc<Connect>,
     /// The traffic of the routes to the upstream, kept while the upstream keeps its name.
@@ -71,6 +74,7 @@ impl CompiledUpstream {
             hash_key: (upstream.balance() == Balance::ConsistentHash).then(|| upstream.hash_key()),
             timeouts: upstream.timeouts,
             retries: upstream.retries(),
+            retry_on_reset: upstream.retry_on_reset(),
             connect,
             stats,
         }
@@ -97,6 +101,12 @@ impl CompiledUpstream {
     /// Returns how many other targets a request tries when it cannot connect.
     pub(crate) fn retries(&self) -> u32 {
         self.retries
+    }
+
+    /// Returns whether idempotent requests whose new connection was closed or reset before the
+    /// response header try another target too.
+    pub(crate) fn retry_on_reset(&self) -> bool {
+        self.retry_on_reset
     }
 
     /// Returns the peer that sends a request of a route with time limits `route` to `target`.

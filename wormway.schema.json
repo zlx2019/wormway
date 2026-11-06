@@ -1458,11 +1458,18 @@
           "description": "The protocol spoken with the targets. Default: `\"h1\"`."
         },
         "retries": {
-          "description": "How many other targets a request tries when it cannot connect, from 0 to\n[`Upstream::MAX_RETRIES`]. A request that reached a target is not sent to another one.\nDefault: 1.",
+          "description": "How many other targets a request tries when it cannot connect, from 0 to\n[`Upstream::MAX_RETRIES`]. A request that reached a target is not sent to another one,\nunless `retry_on_reset` allows it. Default: 1.",
           "format": "uint32",
           "minimum": 0,
           "type": [
             "integer",
+            "null"
+          ]
+        },
+        "retry_on_reset": {
+          "description": "Also send a request to another target, within `retries`, when the connection opened for\nit was closed or reset before the response header arrived, as when a target exits: for\nidempotent methods, such as GET, PUT and DELETE, and only while the request body can be\nsent again. The target may have started on such a request, so turn this on only if\nrunning a request twice is harmless; Nginx does this by default. Time limits never lead\nto another target. Default: `false`.",
+          "type": [
+            "boolean",
             "null"
           ]
         },

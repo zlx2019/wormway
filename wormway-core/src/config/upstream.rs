@@ -29,10 +29,18 @@ pub struct Upstream {
     #[serde(default, skip_serializing_if = "Timeouts::is_default")]
     pub timeouts: Timeouts,
     /// How many other targets a request tries when it cannot connect, from 0 to
-    /// [`Upstream::MAX_RETRIES`]. A request that reached a target is not sent to another one.
-    /// Default: 1.
+    /// [`Upstream::MAX_RETRIES`]. A request that reached a target is not sent to another one,
+    /// unless `retry_on_reset` allows it. Default: 1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retries: Option<u32>,
+    /// Also send a request to another target, within `retries`, when the connection opened for
+    /// it was closed or reset before the response header arrived, as when a target exits: for
+    /// idempotent methods, such as GET, PUT and DELETE, and only while the request body can be
+    /// sent again. The target may have started on such a request, so turn this on only if
+    /// running a request twice is harmless; Nginx does this by default. Time limits never lead
+    /// to another target. Default: `false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_on_reset: Option<bool>,
     /// The protocol spoken with the targets. Default: `"h1"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol: Option<UpstreamProtocol>,
@@ -68,6 +76,11 @@ impl Upstream {
     /// Returns the number of retries in effect.
     pub fn retries(&self) -> u32 {
         self.retries.unwrap_or(Self::DEFAULT_RETRIES)
+    }
+
+    /// Returns whether requests whose new connection was closed or reset go to another target.
+    pub fn retry_on_reset(&self) -> bool {
+        self.retry_on_reset.unwrap_or(false)
     }
 
     /// Returns the protocol in effect.
@@ -790,6 +803,7 @@ mod tests {
             hash_key = { cookie = "session" }
             timeouts = { connect = "2s", idle = "5m" }
             retries = 0
+            retry_on_reset = true
         "#;
         let upstream: Upstream = toml::from_str(text).unwrap();
         assert_eq!(upstream.balance(), Balance::ConsistentHash);
@@ -798,6 +812,7 @@ mod tests {
         assert_eq!(upstream.timeouts.read(), Timeouts::DEFAULT_READ);
         assert_eq!(upstream.timeouts.idle(), Duration::from_secs(300));
         assert_eq!(upstream.retries(), 0);
+        assert!(upstream.retry_on_reset());
         let toml = toml::to_string(&upstream).unwrap();
         assert_eq!(toml::from_str::<Upstream>(&toml).unwrap(), upstream);
         let json = serde_json::to_string(&upstream).unwrap();
@@ -807,6 +822,7 @@ mod tests {
         assert_eq!(plain.balance(), Balance::RoundRobin);
         assert_eq!(plain.hash_key(), HashKey::ClientIp);
         assert_eq!(plain.retries(), Upstream::DEFAULT_RETRIES);
+        assert!(!plain.retry_on_reset());
         assert_eq!(plain.timeouts, Timeouts::default());
         for key in [r#""uri""#, r#"{ header = "X-User" }"#, r#""client_ip""#] {
             let text = format!("targets = [\"10.0.0.1:80\"]\nhash_key = {key}");

@@ -42,7 +42,7 @@ both proxies. Both proxies leave their access logs off unless a scenario turns t
 | 3 | A TLS handshake per request | rates from 200 to 5000 per second, no keep-alive |
 | 4 | 1 MiB responses | rates from 50 to 800 per second, 16 connections |
 | 5 | Memory of 10000 idle WebSocket connections | resident memory before and while they are held |
-| 6 | One of two upstream targets stops for 15 seconds | 2000 per second for 40 seconds; Wormway with passive checks, Nginx with `max_fails` |
+| 6 | One of two upstream targets stops for 15 seconds | 2000 per second for 40 seconds; Wormway with passive checks and `retry_on_reset`, Nginx with `max_fails`, which retries on the other target by default |
 | 7 | Features turned on one by one: request headers, rate limit, API key, JSON and combined access logs, all | 5000 and 10000 per second |
 | 8 | A configuration change every second, SIGHUP for both | 5000 per second for 40 seconds, against the same load without changes |
 

@@ -347,6 +347,68 @@ async fn does_not_retry_requests_that_reached_a_target() {
     assert_eq!(served.load(Ordering::SeqCst), 2, "no third request");
 }
 
+/// With `retry_on_reset`, a GET whose new connection the target closed before answering goes to
+/// another target. A POST does not, nor does a request that ran out of time.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retries_reset_connections_elsewhere_when_allowed() {
+    let (closing, read) = raw_upstream(|_| Reply::Drop).await;
+    let live = upstream("live").await;
+    let slow = serve(axum::Router::new().fallback(|| async {
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        "late"
+    }))
+    .await;
+    let server = start(&format!(
+        r#"
+        [routes.closing]
+        match = {{ paths = ["/closing"] }}
+        upstream = "closing"
+        [routes.slow]
+        match = {{ paths = ["/slow"] }}
+        upstream = "slow"
+        [upstreams.closing]
+        targets = ["{closing}", "{live}"]
+        retry_on_reset = true
+        [upstreams.slow]
+        targets = ["{slow}", "{live}"]
+        retry_on_reset = true
+        timeouts = {{ read = "300ms" }}
+        "#
+    ))
+    .await;
+    let web = addr(&server, "web").await;
+    for _ in 0..4 {
+        let (status, body) = get(web, "/closing").await;
+        assert_eq!((status, answered_by(&body)), (200, "live"));
+    }
+    let sent = read.load(Ordering::SeqCst);
+    assert!(sent > 0, "no GET reached the closing target");
+
+    let mut failed = 0;
+    for _ in 0..4 {
+        let response = client()
+            .post(format!("http://{web}/closing"))
+            .send()
+            .await
+            .expect("send");
+        if response.status() == StatusCode::BAD_GATEWAY {
+            failed += 1;
+        } else {
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+    }
+    assert!(failed > 0, "no POST reached the closing target");
+    assert_eq!(
+        read.load(Ordering::SeqCst),
+        sent + failed,
+        "each POST was sent once"
+    );
+
+    let mut statuses = [get(web, "/slow").await.0, get(web, "/slow").await.0];
+    statuses.sort();
+    assert_eq!(statuses, [200, 504]);
+}
+
 /// An idle connection that the upstream closed is retried over a new one for GET, but not for
 /// POST, which the upstream may have acted on.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

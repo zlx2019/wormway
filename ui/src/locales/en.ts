@@ -256,7 +256,10 @@ export const en = {
     h2c: "HTTP/2 without TLS (h2c)",
     retries: "Retries",
     retriesHint:
-      "How many other targets a request tries when connecting fails; 1 by default.",
+      "How many other targets a request tries when connecting fails, or when the connection is reset with the switch below; 1 by default.",
+    retryOnReset: "Retry when the connection is reset",
+    retryOnResetHint:
+      "Also sends GET, PUT, DELETE and other idempotent requests to another target when the target closes the new connection before answering, as when it exits. The target may have started on them, so they can run twice.",
     timeouts: "Time limits",
     connect: "Connect",
     read: "Read",

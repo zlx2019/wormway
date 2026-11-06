@@ -242,7 +242,11 @@ export const zh: Messages = {
     h2: "TLS 上的 HTTP/2",
     h2c: "不加密的 HTTP/2（h2c）",
     retries: "重试次数",
-    retriesHint: "连接失败时最多换几个目标重试；默认 1。",
+    retriesHint:
+      "连接失败时（打开下面的开关后，连接被重置时也算）最多换几个目标重试；默认 1。",
+    retryOnReset: "连接被重置时也重试",
+    retryOnResetHint:
+      "目标还没响应就关闭了新建的连接（比如它退出了）时，GET、PUT、DELETE 等幂等请求也换目标重试。目标可能已经开始处理，请求可能被执行两次。",
     timeouts: "超时",
     connect: "连接",
     read: "读",

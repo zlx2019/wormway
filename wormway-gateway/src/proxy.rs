@@ -72,7 +72,7 @@ pub(crate) struct RequestContext {
     tried: Vec<Backend>,
     /// Target of the next attempt, picked when an attempt failed.
     next: Option<Backend>,
-    /// Attempts made at other targets after a connection failed.
+    /// Attempts made at other targets after an attempt failed.
     retries: u32,
     /// The request counted at its target, for upstreams balanced by requests in progress.
     inflight: Option<Inflight>,
@@ -313,24 +313,18 @@ impl ProxyHttp for Proxy {
             "cannot connect: {}; trying another target",
             describe(&e)
         );
-        let tried = &ctx.tried;
-        let next = upstream
-            .runtime
-            .select(&selection_key(session, upstream), |target| {
-                !tried.iter().any(|seen| seen.addr == target.addr)
-            });
-        if let Some(next) = next {
-            ctx.retries += 1;
-            ctx.next = Some(next);
+        if pick_another(session, ctx, upstream) {
             e.set_retry(true);
         }
         e
     }
 
-    /// Retries over a new connection to the same target only when a reused connection turned
-    /// out closed, as Pingora does: for idempotent requests whose body can be sent again, and
-    /// never once the response has started. Counts a failure of the target before its response
-    /// header for the passive health checks, unless a reused connection may just have closed.
+    /// Retries over a new connection to the same target when a reused connection turned out
+    /// closed, as Pingora does, and at another target when the upstream has `retry_on_reset`
+    /// and a new connection was closed or reset before the response header: for idempotent
+    /// requests whose body can be sent again, and never once the response has started. Counts
+    /// a failure of the target before its response header for the passive health checks,
+    /// unless a reused connection may just have closed.
     fn error_while_proxy(
         &self,
         peer: &HttpPeer,
@@ -341,6 +335,7 @@ impl ProxyHttp for Proxy {
     ) -> Box<Error> {
         let mut e = e.more_context(format!("Peer: {peer}"));
         let stale = client_reused && e.retry == RetryType::ReusedOnly;
+        let reset = !client_reused && !ctx.answered && dropped(&e);
         if !stale
             && !ctx.answered
             && *e.esource() == ErrorSource::Upstream
@@ -354,11 +349,13 @@ impl ProxyHttp for Proxy {
             || session.as_ref().retry_buffer_truncated()
         {
             e.set_retry(false);
+        } else if reset && self.retry_reset(session, ctx, &e) {
+            e.set_retry(true);
         } else {
             e.retry.decide_reuse(client_reused);
-        }
-        if e.retry() {
-            ctx.next = ctx.tried.last().cloned();
+            if e.retry() {
+                ctx.next = ctx.tried.last().cloned();
+            }
         }
         e
     }
@@ -408,10 +405,10 @@ impl ProxyHttp for Proxy {
 
     /// Logs the request if it failed, counts it and its last attempt at a target in the
     /// metrics and in the traffic of the last minute, and writes its line to the access log
-    /// unless its route leaves it out. Attempts
-    /// retried after they had connected are not counted: Pingora retries those only when the
-    /// target did not take the request, such as over a reused connection that turned out
-    /// closed, or on an HTTP/2 stream it refused.
+    /// unless its route leaves it out. Attempts retried at another target were counted when
+    /// they failed. Those retried at the same target after they had connected are not counted:
+    /// Pingora retries those only when the target did not take the request, such as over a
+    /// reused connection that turned out closed, or on an HTTP/2 stream it refused.
     async fn logging(
         &self,
         session: &mut Session,
@@ -530,6 +527,37 @@ impl ProxyHttp for Proxy {
 }
 
 impl Proxy {
+    /// Picks another target for a request whose new connection was closed or reset before the
+    /// response header with `e`, if the upstream has `retry_on_reset` and retries and targets
+    /// left. Counts the failed attempt in the metrics then, since the request goes on.
+    fn retry_reset(&self, session: &Session, ctx: &mut RequestContext, e: &Error) -> bool {
+        let Some(route) = ctx.route.clone() else {
+            return false;
+        };
+        let Some(upstream) = route.upstream() else {
+            return false;
+        };
+        let Some(target) = ctx.tried.last() else {
+            return false;
+        };
+        if !upstream.retry_on_reset() || ctx.retries >= upstream.retries() {
+            return false;
+        }
+        tracing::debug!(
+            listener = %self.listener,
+            route = %route.name,
+            target = %target.addr,
+            "connection closed before the response: {}; trying another target",
+            describe(e)
+        );
+        if !pick_another(session, ctx, upstream) {
+            return false;
+        }
+        upstream.attempts.record(attempt_result(Some(e)));
+        ctx.counted = true;
+        true
+    }
+
     /// Logs a request that failed with `error`, at a level that follows where the failure came
     /// from: a warning for the upstream and for answers Wormway chose, such as 503 without a
     /// usable target; debug for clients that went away and for requests that the limits of
@@ -937,6 +965,37 @@ fn attempt_result(error: Option<&Error>) -> &'static str {
         Some(e) if *e.esource() == ErrorSource::Upstream => "error",
         _ => "ok",
     }
+}
+
+/// Picks a target of `upstream` that the request has not tried for its next attempt; `false`
+/// when there is none.
+fn pick_another(session: &Session, ctx: &mut RequestContext, upstream: &CompiledUpstream) -> bool {
+    let tried = &ctx.tried;
+    let next = upstream
+        .runtime
+        .select(&selection_key(session, upstream), |target| {
+            !tried.iter().any(|seen| seen.addr == target.addr)
+        });
+    let Some(next) = next else {
+        return false;
+    };
+    ctx.retries += 1;
+    ctx.next = Some(next);
+    true
+}
+
+/// Whether `e` says that the target closed or reset the connection before its response header:
+/// what Pingora retries over reused connections only, or a system error while sending the
+/// request. Like Pingora, TLS errors are left out.
+fn dropped(e: &Error) -> bool {
+    if *e.esource() != ErrorSource::Upstream {
+        return false;
+    }
+    e.retry == RetryType::ReusedOnly
+        || *e.etype() == ErrorType::WriteError
+            && e.root_cause()
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.raw_os_error().is_some())
 }
 
 /// Returns what consistent hashing hashes for a request to `upstream`: its key, or the client

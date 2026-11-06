@@ -398,6 +398,8 @@ def wormway_config(work: Work, settings: Settings) -> str:
         lines.append(f'tls = {{ ca = "{work.path("ca.pem")}" }}')
     if len(targets) > 1:
         lines.append("passive = { max_fails = 1, fail_timeout = \"10s\" }")
+        # As Nginx does by default with proxy_next_upstream.
+        lines.append("retry_on_reset = true")
     lines += ["[upstreams.ws]", f'targets = ["127.0.0.1:{WS_PORT}"]']
     if "apikey" in settings.features:
         digest = hashlib.sha256(API_KEY.encode()).hexdigest()

@@ -109,6 +109,11 @@ export function UpstreamForm() {
         hint={t("upstreams.retriesHint")}
         placeholder="1"
       />
+      <SwitchSetting
+        path="retry_on_reset"
+        label={t("upstreams.retryOnReset")}
+        hint={t("upstreams.retryOnResetHint")}
+      />
       <Group title={t("upstreams.timeouts")}>
         <TextSetting
           path="timeouts.connect"
