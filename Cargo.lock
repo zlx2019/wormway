@@ -1323,6 +1323,8 @@ version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 dependencies = [
+ "allocator-api2",
+ "equivalent",
  "foldhash",
 ]
 
@@ -2257,7 +2259,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 [[package]]
 name = "pingora"
 version = "0.9.0"
-source = "git+https://github.com/zlx2019/pingora.git?branch=main#17d6086520f44f6b63064d899470a54fb22ce75a"
+source = "git+https://github.com/zlx2019/pingora.git?branch=main#2852e6954644373f5403707e251e594a41a702a4"
 dependencies = [
  "pingora-cache",
  "pingora-core",
@@ -2270,7 +2272,7 @@ dependencies = [
 [[package]]
 name = "pingora-cache"
 version = "0.9.0"
-source = "git+https://github.com/zlx2019/pingora.git?branch=main#17d6086520f44f6b63064d899470a54fb22ce75a"
+source = "git+https://github.com/zlx2019/pingora.git?branch=main#2852e6954644373f5403707e251e594a41a702a4"
 dependencies = [
  "ahash",
  "arrayvec",
@@ -2305,7 +2307,7 @@ dependencies = [
 [[package]]
 name = "pingora-core"
 version = "0.9.0"
-source = "git+https://github.com/zlx2019/pingora.git?branch=main#17d6086520f44f6b63064d899470a54fb22ce75a"
+source = "git+https://github.com/zlx2019/pingora.git?branch=main#2852e6954644373f5403707e251e594a41a702a4"
 dependencies = [
  "ahash",
  "async-trait",
@@ -2359,12 +2361,12 @@ dependencies = [
 [[package]]
 name = "pingora-error"
 version = "0.9.0"
-source = "git+https://github.com/zlx2019/pingora.git?branch=main#17d6086520f44f6b63064d899470a54fb22ce75a"
+source = "git+https://github.com/zlx2019/pingora.git?branch=main#2852e6954644373f5403707e251e594a41a702a4"
 
 [[package]]
 name = "pingora-header-serde"
 version = "0.9.0"
-source = "git+https://github.com/zlx2019/pingora.git?branch=main#17d6086520f44f6b63064d899470a54fb22ce75a"
+source = "git+https://github.com/zlx2019/pingora.git?branch=main#2852e6954644373f5403707e251e594a41a702a4"
 dependencies = [
  "bytes",
  "http",
@@ -2379,7 +2381,7 @@ dependencies = [
 [[package]]
 name = "pingora-http"
 version = "0.9.0"
-source = "git+https://github.com/zlx2019/pingora.git?branch=main#17d6086520f44f6b63064d899470a54fb22ce75a"
+source = "git+https://github.com/zlx2019/pingora.git?branch=main#2852e6954644373f5403707e251e594a41a702a4"
 dependencies = [
  "bytes",
  "http",
@@ -2390,7 +2392,7 @@ dependencies = [
 [[package]]
 name = "pingora-http-parser"
 version = "0.9.0"
-source = "git+https://github.com/zlx2019/pingora.git?branch=main#17d6086520f44f6b63064d899470a54fb22ce75a"
+source = "git+https://github.com/zlx2019/pingora.git?branch=main#2852e6954644373f5403707e251e594a41a702a4"
 dependencies = [
  "httparse",
 ]
@@ -2398,7 +2400,7 @@ dependencies = [
 [[package]]
 name = "pingora-ketama"
 version = "0.9.0"
-source = "git+https://github.com/zlx2019/pingora.git?branch=main#17d6086520f44f6b63064d899470a54fb22ce75a"
+source = "git+https://github.com/zlx2019/pingora.git?branch=main#2852e6954644373f5403707e251e594a41a702a4"
 dependencies = [
  "crc32fast",
 ]
@@ -2406,7 +2408,7 @@ dependencies = [
 [[package]]
 name = "pingora-load-balancing"
 version = "0.9.0"
-source = "git+https://github.com/zlx2019/pingora.git?branch=main#17d6086520f44f6b63064d899470a54fb22ce75a"
+source = "git+https://github.com/zlx2019/pingora.git?branch=main#2852e6954644373f5403707e251e594a41a702a4"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -2427,13 +2429,13 @@ dependencies = [
 [[package]]
 name = "pingora-lru"
 version = "0.9.0"
-source = "git+https://github.com/zlx2019/pingora.git?branch=main#17d6086520f44f6b63064d899470a54fb22ce75a"
+source = "git+https://github.com/zlx2019/pingora.git?branch=main#2852e6954644373f5403707e251e594a41a702a4"
 dependencies = [
  "ahash",
  "arrayvec",
  "async-channel",
  "flurry",
- "hashbrown 0.16.1",
+ "hashbrown 0.17.1",
  "log",
  "parking_lot",
  "rand 0.8.8",
@@ -2443,7 +2445,7 @@ dependencies = [
 [[package]]
 name = "pingora-pool"
 version = "0.9.0"
-source = "git+https://github.com/zlx2019/pingora.git?branch=main#17d6086520f44f6b63064d899470a54fb22ce75a"
+source = "git+https://github.com/zlx2019/pingora.git?branch=main#2852e6954644373f5403707e251e594a41a702a4"
 dependencies = [
  "crossbeam-queue",
  "dashmap",
@@ -2458,7 +2460,7 @@ dependencies = [
 [[package]]
 name = "pingora-proxy"
 version = "0.9.0"
-source = "git+https://github.com/zlx2019/pingora.git?branch=main#17d6086520f44f6b63064d899470a54fb22ce75a"
+source = "git+https://github.com/zlx2019/pingora.git?branch=main#2852e6954644373f5403707e251e594a41a702a4"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2480,7 +2482,7 @@ dependencies = [
 [[package]]
 name = "pingora-runtime"
 version = "0.9.0"
-source = "git+https://github.com/zlx2019/pingora.git?branch=main#17d6086520f44f6b63064d899470a54fb22ce75a"
+source = "git+https://github.com/zlx2019/pingora.git?branch=main#2852e6954644373f5403707e251e594a41a702a4"
 dependencies = [
  "log",
  "once_cell",
@@ -2493,7 +2495,7 @@ dependencies = [
 [[package]]
 name = "pingora-rustls"
 version = "0.9.0"
-source = "git+https://github.com/zlx2019/pingora.git?branch=main#17d6086520f44f6b63064d899470a54fb22ce75a"
+source = "git+https://github.com/zlx2019/pingora.git?branch=main#2852e6954644373f5403707e251e594a41a702a4"
 dependencies = [
  "log",
  "no_debug",
@@ -2509,7 +2511,7 @@ dependencies = [
 [[package]]
 name = "pingora-timeout"
 version = "0.9.0"
-source = "git+https://github.com/zlx2019/pingora.git?branch=main#17d6086520f44f6b63064d899470a54fb22ce75a"
+source = "git+https://github.com/zlx2019/pingora.git?branch=main#2852e6954644373f5403707e251e594a41a702a4"
 dependencies = [
  "once_cell",
  "parking_lot",
