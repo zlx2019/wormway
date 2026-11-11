@@ -10,7 +10,7 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 use pingora::apps::{HttpServerApp, HttpServerOptions, ServerApp};
 use pingora::listeners::tls::Acceptor;
-use pingora::protocols::l4::stream::Stream as L4Stream;
+use pingora::protocols::l4::stream::{L4BufferSettings, Stream as L4Stream};
 use pingora::protocols::{GetSocketDigest, SocketDigest, Stream};
 use pingora::proxy::{HttpProxy, http_proxy};
 use pingora::server::configuration::ServerConf;
@@ -215,6 +215,10 @@ async fn read_preface(mut stream: L4Stream, limit: Duration) -> Option<L4Stream>
 /// Turns an accepted connection into a Pingora stream that knows the address of its client.
 fn l4_stream(conn: Connection) -> L4Stream {
     let mut stream = L4Stream::from(conn.stream);
+    // The write buffer of Pingora's own listeners, so that a small response leaves with its
+    // header at once, instead of a write each. Reads stay unbuffered: Pingora reads into
+    // buffers of its own.
+    stream.set_buffer(L4BufferSettings::default().read(0));
     // The same digest as Pingora's own listeners set up, so that `client_addr()` works.
     let digest = SocketDigest::from_raw_fd(stream.as_raw_fd());
     let _ = digest.peer_addr.set(Some(conn.peer.into()));
@@ -251,6 +255,32 @@ mod tests {
         let (server, _) = listener.accept().await.unwrap();
         let short = read_preface(L4Stream::from(server), Duration::from_millis(100)).await;
         assert!(short.is_none());
+    }
+
+    /// Small writes wait for the flush and leave together.
+    #[tokio::test]
+    async fn buffers_small_writes_until_flushed() {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::{TcpListener, TcpStream};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (server, peer) = listener.accept().await.unwrap();
+        let mut stream = l4_stream(Connection {
+            stream: server,
+            peer,
+        });
+        stream.write_all(b"head").await.unwrap();
+        stream.write_all(b"body").await.unwrap();
+
+        let mut read = [0; 8];
+        let early = tokio::time::timeout(Duration::from_millis(100), client.read(&mut read)).await;
+        assert!(early.is_err(), "nothing arrives before the flush");
+        stream.flush().await.unwrap();
+        client.read_exact(&mut read).await.unwrap();
+        assert_eq!(&read, b"headbody");
     }
 
     /// Timeouts round up to whole seconds; zero turns HTTP/1.1 keep-alive off and leaves
