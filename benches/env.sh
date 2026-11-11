@@ -25,6 +25,10 @@ case "$(uname -s)" in
     Linux)
         echo "cpu: $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | sed 's/^ //')"
         echo "cores: $(nproc)"
+        # The CPUs that share a core, whose hyperthreads compete for its execution units.
+        siblings=$(cat /sys/devices/system/cpu/cpu[0-9]*/topology/thread_siblings_list 2>/dev/null \
+            | sort -u | paste -sd ' ' - || true)
+        echo "hyperthread siblings: ${siblings:-unknown}"
         echo "memory: $(free -h | awk '/^Mem:/ {print $2}')"
         echo "cpu governor: $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo unknown)"
         echo "swap: $(free -h | awk '/^Swap:/ {print $2}')"

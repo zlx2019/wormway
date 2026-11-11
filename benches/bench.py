@@ -42,6 +42,10 @@ ALLOCATORS = {
     "system": ["--no-default-features"],
     "mimalloc": ["--no-default-features", "--features", "mimalloc"],
 }
+# Linked so that perf can unwind the stacks of Wormway with DWARF in scenario 9: Rust links with
+# rust-lld on x86-64 Linux since 1.90, and perf mislocates the unwinding tables in the default
+# layout of lld. GNU ld accepts the flag too.
+LINK_FLAGS = "-C link-arg=-Wl,-z,separate-code"
 
 # Ports on the loopback interface.
 HTTP_PORT = 8080  # the proxy under test, plain HTTP
@@ -933,11 +937,14 @@ def scenario_8(proxy: Proxy, run: Run) -> None:
             record.write_text(json.dumps(result, indent=1))
 
 
-# What perf stat counts in scenario 9. Virtual machines often lack the hardware counters, cycles
-# and instructions, which perf then reports as not supported.
-PERF_EVENTS = "task-clock,context-switches,cpu-migrations,page-faults,cycles,instructions"
-# Samples a second of each CPU that perf record takes: few enough for its DWARF call graphs.
-PERF_FREQUENCY = 499
+# What perf stat counts in scenario 9, the cycles and instructions in the kernel apart as well.
+# Virtual machines often lack the hardware counters, which perf then reports as not supported.
+PERF_EVENTS = "task-clock,context-switches,cpu-migrations,page-faults,cycles,instructions,cycles:k,instructions:k"
+# Samples a second of a thread that perf record aims at, and the bytes of its stack that it copies
+# with each for the DWARF call graphs: the most it allows, as the futures of Pingora put 30-45 KB of
+# stack between a function and the tokio worker. Few samples keep perf.data at a few hundred MB.
+PERF_FREQUENCY = 199
+PERF_STACK_BYTES = 65528
 
 
 def perf_problem() -> str | None:
@@ -965,27 +972,49 @@ def perf_during(proxy: Proxy, run: Run, arguments: list[str], log: Path, measure
 
 def fold_stacks(data: Path, folded: Path) -> None:
     """Writes the stacks that perf recorded in `data` as the input of flame graphs: one line per
-    stack, its frames from the thread name down, then its samples."""
-    script = subprocess.Popen(["perf", "script", "-i", str(data), "-F", "comm,ip,sym"],
+    stack, its frames from the thread name down, then the events that its samples stand for
+    (cycles, or nanoseconds without hardware counters). perf varies the period of the samples to
+    keep their rate, so counting the samples would favor the threads that run in short bursts."""
+    script = subprocess.Popen(["perf", "script", "-i", str(data), "-F", "comm,period,ip,sym"],
                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, errors="replace")
     assert script.stdout is not None
-    counts: dict[str, int] = {}
+    weights: dict[str, int] = {}
     thread: str | None = None
+    period = 0
     frames: list[str] = []
     for line in [*script.stdout, ""]:
         if not line.strip():
             if thread is not None:
                 stack = ";".join([thread, *reversed(frames)])
-                counts[stack] = counts.get(stack, 0) + 1
+                weights[stack] = weights.get(stack, 0) + period
             thread, frames = None, []
         elif line[0].isspace():
             # The address, then the function.
             parts = line.split(None, 1)
             frames.append(parts[1].strip() if len(parts) > 1 else "[unknown]")
         else:
-            thread = line.strip().replace(" ", "_")
+            # The thread name, which may have spaces, and the period; then the address and the
+            # function as well when perf found no call chain.
+            header = re.match(r"(.+?)\s+(\d+)(?:\s+\S+\s+(.+?))?\s*$", line)
+            if header is None:
+                continue
+            thread, period = header[1].replace(" ", "_"), int(header[2])
+            if header[3]:
+                frames.append(header[3])
     script.wait()
-    folded.write_text("".join(f"{stack} {count}\n" for stack, count in sorted(counts.items())))
+    folded.write_text("".join(f"{stack} {weight}\n" for stack, weight in sorted(weights.items())))
+
+
+def tidy_report(text: str) -> str:
+    """The report of perf without the padding of its last column, the IPC columns, which need
+    branch records that virtual machines lack (perf prints '-' then), and the tip it ends with."""
+    lines = []
+    for line in text.splitlines():
+        if line.startswith("# ..") or "tips.txt" in line:
+            continue  # the dotted line under the header is as long as the longest name
+        line = re.sub(r"\s+IPC\s+\[IPC Coverage\]\s*$", "", line)
+        lines.append(re.sub(r"\s+-\s+-\s*$", "", line).rstrip())
+    return "\n".join(lines) + "\n"
 
 
 def scenario_9(proxy: Proxy, run: Run) -> None:
@@ -1023,7 +1052,8 @@ def profile(proxy: Proxy, run: Run, settings: Settings, out: Path) -> None:
     data.unlink(missing_ok=True)
     sampled = out / "sampled"
     sampled.mkdir(exist_ok=True)
-    perf_during(proxy, run, ["record", "-F", str(PERF_FREQUENCY), "--call-graph", "dwarf", "-o", str(data)],
+    perf_during(proxy, run, ["record", "-F", str(PERF_FREQUENCY), "--call-graph", f"dwarf,{PERF_STACK_BYTES}",
+                             "-o", str(data)],
                 out / "perf-record.log",
                 lambda: measure(proxy, run.layout, load, rate, options, sampled / f"{rate}-1.json"))
     proxy.stop()
@@ -1032,10 +1062,12 @@ def profile(proxy: Proxy, run: Run, settings: Settings, out: Path) -> None:
         return
 
     print("    reading the samples", flush=True)
-    with open(out / "self.txt", "w") as report:
-        subprocess.run(["perf", "report", "-i", str(data), "--stdio", "--no-children", "-g", "none",
-                        "--sort", "dso,symbol", "--percent-limit", "0.2"],
-                       stdout=report, stderr=subprocess.DEVNULL, check=False)
+    # perf warns about lost samples on stderr.
+    report = subprocess.run(["perf", "report", "-i", str(data), "--stdio", "--no-children", "-g", "none",
+                             "--sort", "dso,symbol", "--percent-limit", "0.2"],
+                            capture_output=True, text=True, errors="replace", check=False)
+    (out / "self.txt").write_text(tidy_report(report.stdout))
+    (out / "perf-report.log").write_text(report.stderr)
     fold_stacks(data, out / "stacks.folded")
     data.unlink()
 
@@ -1198,9 +1230,13 @@ def parse_cpus(text: str) -> list[int]:
 def command_build(_: argparse.Namespace) -> None:
     """Builds the release binary once per allocator, into target/bench/."""
     BINARIES.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    if sys.platform.startswith("linux"):
+        env["RUSTFLAGS"] = f"{env.get('RUSTFLAGS', '')} {LINK_FLAGS}".strip()
     for name, features in ALLOCATORS.items():
         print(f"building with the {name} allocator", flush=True)
-        built = subprocess.run(["cargo", "build", "--release", "--locked", "-p", "wormway", *features], cwd=REPO)
+        built = subprocess.run(["cargo", "build", "--release", "--locked", "-p", "wormway", *features], cwd=REPO,
+                               env=env)
         if built.returncode != 0:
             sys.exit(f"cargo build failed with the {name} allocator; see its output above and the build "
                      "tools in benches/README.md")
@@ -1336,14 +1372,16 @@ def memory_table(scenario: Path) -> list[str]:
 
 
 def perf_counts(stat: Path) -> dict[str, float]:
-    """The counts in the CSV output of perf stat, by event; those it could not count are left out."""
+    """The counts in the CSV output of perf stat, by event, with `:k` for those in the kernel only;
+    those it could not count are left out."""
     counts = {}
     for line in stat.read_text().splitlines():
         fields = line.split(",")
         if line.startswith("#") or len(fields) < 3:
             continue
+        event, _, modifier = fields[2].partition(":")
         try:
-            counts[fields[2].split(":")[0]] = float(fields[0])
+            counts[f"{event}:k" if modifier == "k" else event] = float(fields[0])
         except ValueError:
             pass  # <not supported> or <not counted>
     return counts
@@ -1352,8 +1390,8 @@ def perf_counts(stat: Path) -> dict[str, float]:
 def profile_table(scenario: Path) -> list[str]:
     """One row per proxy and thread count with what perf stat counted per request, then the
     functions that perf record found running most often."""
-    rows = ["| proxy | requests | CPU µs | instructions | cycles | IPC | context switches | migrations | "
-            "page faults |", "|---|---|---|---|---|---|---|---|---|"]
+    rows = ["| proxy | requests | CPU µs | instructions | cycles | IPC | kernel instructions | kernel cycles | "
+            "context switches | migrations | page faults |", "|---|---|---|---|---|---|---|---|---|---|---|"]
     tops = []
     for stat in sorted(scenario.rglob("stat.csv")):
         directory = stat.parent
@@ -1373,11 +1411,13 @@ def profile_table(scenario: Path) -> list[str]:
         if counts.get("cycles") and "instructions" in counts:
             ipc = f"{counts['instructions'] / counts['cycles']:.2f}"
         rows.append(f"| {name} | {requests:,.0f} | {per('task-clock', 1, 1000)} | "
-                    f"{per('instructions', 0)} | {per('cycles', 0)} | {ipc} | {per('context-switches', 3)} | "
+                    f"{per('instructions', 0)} | {per('cycles', 0)} | {ipc} | {per('instructions:k', 0)} | "
+                    f"{per('cycles:k', 0)} | {per('context-switches', 3)} | "
                     f"{per('cpu-migrations', 3)} | {per('page-faults', 3)} |")
         report = directory / "self.txt"
         if report.exists():
-            functions = [line for line in report.read_text(errors="replace").splitlines()
+            # Reports of earlier runs are not tidied yet.
+            functions = [line for line in tidy_report(report.read_text(errors="replace")).splitlines()
                          if line.strip() and not line.startswith("#")]
             tops += ["", f"Most samples in their own code, {name}:", "", "```", *functions[:15], "```"]
     return rows + tops

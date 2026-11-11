@@ -61,11 +61,11 @@ What each run records: oha's latency report, the CPU time and the resident memor
 queues (`/proc/net/netstat`), and the requests per upstream connection (`stub_status` of the
 upstream).
 
-Scenario 9 adds what `perf stat` counted (`stat.csv`; virtual machines often lack the hardware
-counters, cycles and instructions), the functions with the most samples of their own
-(`self.txt`), and every sampled call stack in the folded format of flame graphs
-(`stacks.folded`). Nginx from nginx.org ships without symbols, so most of its own functions show
-up as addresses.
+Scenario 9 adds what `perf stat` counted (`stat.csv`), with the cycles and instructions in the
+kernel apart as well (virtual machines often lack these hardware counters); the functions with
+the most samples of their own (`self.txt`); and every sampled call stack in the folded format of
+flame graphs, weighted by the CPU time of its samples (`stacks.folded`). Nginx from nginx.org ships
+without symbols, so most of its own functions show up as addresses.
 
 ## On a Debian or Ubuntu server
 
@@ -103,6 +103,8 @@ sudo sysctl kernel.perf_event_paranoid=1 kernel.kptr_restrict=0
 Build Wormway once per allocator, into `target/bench/`. The release profile links the whole
 program at once, which needs more than 2 GB of memory: on smaller machines, add a swap file for
 the build, and remove it before measuring, so that swapping does not distort the memory figures.
+`build` links with `-z separate-code`: perf cannot unwind the stacks of Wormway in the default
+layout of rust-lld, the linker of Rust on x86-64 Linux since 1.90.
 
 ```sh
 sudo fallocate -l 4G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
