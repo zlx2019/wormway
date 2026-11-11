@@ -3,7 +3,7 @@
 
 use std::cell::Cell;
 use std::hash::{BuildHasher, RandomState};
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::LazyLock;
 
 use http::{HeaderName, HeaderValue};
@@ -16,10 +16,11 @@ use wormway_core::config::{self, HeaderRules};
 pub(crate) struct HeaderEdits {
     /// Headers to remove.
     remove: Vec<HeaderName>,
-    /// Headers to set, replacing their values.
-    set: Vec<(HeaderName, HeaderValue)>,
-    /// Values to add.
-    add: Vec<(HeaderName, HeaderValue)>,
+    /// Headers to set, replacing their values, with the case to write their names in, worked
+    /// out once.
+    set: Vec<(CasedHeaderName, HeaderValue)>,
+    /// Values to add, likewise.
+    add: Vec<(CasedHeaderName, HeaderValue)>,
 }
 
 impl HeaderEdits {
@@ -30,7 +31,7 @@ impl HeaderEdits {
             |values: &std::collections::BTreeMap<config::HeaderName, config::HeaderValue>| {
                 values
                     .iter()
-                    .map(|(name, value)| Ok((parse_name(name)?, parse_value(value)?)))
+                    .map(|(name, value)| Ok((parse_name(name)?.into(), parse_value(value)?)))
                     .collect::<Result<Vec<_>, String>>()
             };
         Ok(Self {
@@ -82,9 +83,9 @@ pub(crate) trait EditHeaders {
     /// Removes every value of header `name`.
     fn remove(&mut self, name: &HeaderName);
     /// Replaces every value of header `name` with `value`.
-    fn insert(&mut self, name: &HeaderName, value: HeaderValue) -> pingora::Result<()>;
+    fn insert(&mut self, name: &CasedHeaderName, value: HeaderValue) -> pingora::Result<()>;
     /// Adds `value` after the values of header `name`.
-    fn append(&mut self, name: &HeaderName, value: HeaderValue) -> pingora::Result<()>;
+    fn append(&mut self, name: &CasedHeaderName, value: HeaderValue) -> pingora::Result<()>;
 }
 
 impl EditHeaders for RequestHeader {
@@ -94,12 +95,12 @@ impl EditHeaders for RequestHeader {
     }
 
     /// Replaces the header.
-    fn insert(&mut self, name: &HeaderName, value: HeaderValue) -> pingora::Result<()> {
+    fn insert(&mut self, name: &CasedHeaderName, value: HeaderValue) -> pingora::Result<()> {
         self.insert_header(name, value)
     }
 
     /// Adds a value.
-    fn append(&mut self, name: &HeaderName, value: HeaderValue) -> pingora::Result<()> {
+    fn append(&mut self, name: &CasedHeaderName, value: HeaderValue) -> pingora::Result<()> {
         self.append_header(name, value).map(|_| ())
     }
 }
@@ -111,12 +112,12 @@ impl EditHeaders for ResponseHeader {
     }
 
     /// Replaces the header.
-    fn insert(&mut self, name: &HeaderName, value: HeaderValue) -> pingora::Result<()> {
+    fn insert(&mut self, name: &CasedHeaderName, value: HeaderValue) -> pingora::Result<()> {
         self.insert_header(name, value)
     }
 
     /// Adds a value.
-    fn append(&mut self, name: &HeaderName, value: HeaderValue) -> pingora::Result<()> {
+    fn append(&mut self, name: &CasedHeaderName, value: HeaderValue) -> pingora::Result<()> {
         self.append_header(name, value).map(|_| ())
     }
 }
@@ -149,9 +150,17 @@ pub(crate) fn set_forwarded(
     match client {
         Some(ip) => {
             // A client of a dual-stack socket shows up as an IPv4-mapped IPv6 address.
-            let ip = ip.to_canonical().to_string();
-            request.insert_header(&X_FORWARDED_FOR, ip.as_str())?;
-            request.insert_header(&X_REAL_IP, ip)?;
+            let mut ipv4 = [0; 15];
+            let ipv6;
+            let address = match ip.to_canonical() {
+                IpAddr::V4(ip) => ipv4_text(ip, &mut ipv4),
+                ip => {
+                    ipv6 = ip.to_string();
+                    ipv6.as_bytes()
+                }
+            };
+            request.insert_header(&X_FORWARDED_FOR, address)?;
+            request.insert_header(&X_REAL_IP, address)?;
         }
         None => {
             request.remove_header(X_FORWARDED_FOR.name());
@@ -181,6 +190,28 @@ pub(crate) fn set_forwarded(
         }
     }
     request.insert_header(&X_REQUEST_ID, id.as_str())
+}
+
+/// Writes `ip` into `text` and returns it; by hand, as `Display` takes several times longer.
+fn ipv4_text(ip: Ipv4Addr, text: &mut [u8; 15]) -> &[u8] {
+    let mut len = 0;
+    for (index, octet) in ip.octets().into_iter().enumerate() {
+        if index > 0 {
+            text[len] = b'.';
+            len += 1;
+        }
+        if octet >= 100 {
+            text[len] = b'0' + octet / 100;
+            len += 1;
+        }
+        if octet >= 10 {
+            text[len] = b'0' + octet / 10 % 10;
+            len += 1;
+        }
+        text[len] = b'0' + octet % 10;
+        len += 1;
+    }
+    &text[..len]
 }
 
 /// The ID of a request: 128 unpredictable bits in lowercase hex, like `$request_id` of Nginx.
@@ -291,6 +322,26 @@ mod tests {
 
         set_forwarded(&mut request, Some(mapped), true, &id, None).unwrap();
         assert!(!request.headers.contains_key("x-consumer"));
+
+        let ipv6: IpAddr = "2001:db8::1".parse().unwrap();
+        set_forwarded(&mut request, Some(ipv6), true, &id, None).unwrap();
+        assert_eq!(request.headers["x-forwarded-for"], "2001:db8::1");
+        assert_eq!(request.headers["x-real-ip"], "2001:db8::1");
+    }
+
+    /// IPv4 addresses come out as `Display` writes them.
+    #[test]
+    fn writes_ipv4_addresses() {
+        for text in [
+            "0.0.0.0",
+            "10.0.0.1",
+            "192.168.100.9",
+            "203.0.113.70",
+            "255.255.255.255",
+        ] {
+            let ip: Ipv4Addr = text.parse().unwrap();
+            assert_eq!(ipv4_text(ip, &mut [0; 15]), text.as_bytes());
+        }
     }
 
     /// IDs are 32 lowercase hex digits and differ between requests.

@@ -274,8 +274,10 @@ impl ProxyHttp for Proxy {
         ctx.inflight = upstream.runtime.track(&target);
         ctx.answered = false;
         ctx.counted = false;
-        ctx.upstream_started.get_or_insert_with(Instant::now);
-        ctx.attempt_started = Some(Instant::now());
+        // One reading of the clock for both.
+        let now = Instant::now();
+        ctx.upstream_started.get_or_insert(now);
+        ctx.attempt_started = Some(now);
         let peer = upstream.peer(&target, &route.timeouts);
         ctx.tried.push(target);
         Ok(Box::new(peer))
