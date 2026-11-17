@@ -46,6 +46,11 @@ ALLOCATORS = {
 # rust-lld on x86-64 Linux since 1.90, and perf mislocates the unwinding tables in the default
 # layout of lld. GNU ld accepts the flag too.
 LINK_FLAGS = "-C link-arg=-Wl,-z,separate-code"
+# The build that scenario 9 samples, target/bench/wormway-frames: with frame pointers, perf walks
+# the stacks of Wormway rather than copying 64 KiB of each to unwind later, so it can sample ten
+# times as often. They cost a register, so everything else measures the builds without them.
+FRAMES = "frames"
+FRAME_FLAGS = "-C force-frame-pointers=yes"
 
 # Ports on the loopback interface.
 HTTP_PORT = 8080  # the proxy under test, plain HTTP
@@ -965,6 +970,8 @@ PERF_EVENTS = "task-clock,context-switches,cpu-migrations,page-faults,cycles,ins
 # with each for the DWARF call graphs: the most it allows, as the futures of Pingora put 30-45 KB of
 # stack between a function and the tokio worker. Few samples keep perf.data at a few hundred MB.
 PERF_FREQUENCY = 199
+# Samples a second when perf walks frame pointers instead, which costs it next to nothing.
+PERF_FRAMES_FREQUENCY = 1999
 PERF_STACK_BYTES = 65528
 
 
@@ -1069,14 +1076,24 @@ def profile(proxy: Proxy, run: Run, settings: Settings, out: Path) -> None:
                 out / "perf-stat.log", lambda: measure(proxy, run.layout, load, rate, options, out / f"{rate}-1.json"))
 
     print(f"    {rate}/s, sampling with perf record", flush=True)
+    sampler, call_graph, frequency = proxy, f"dwarf,{PERF_STACK_BYTES}", PERF_FREQUENCY
+    frames = BINARIES / f"wormway-{FRAMES}"
+    if proxy.kind == "wormway" and frames.exists() and proxy.binary == wormway_binary(None):
+        # The default build has one with frame pointers next to it: sample that one.
+        proxy.stop()
+        sampler, call_graph, frequency = Proxy("wormway", frames, run.work, run.layout), "fp", PERF_FRAMES_FREQUENCY
+        sampler.start(settings)
+        run_oha(run.layout, load, rate, run.options.warmup, None).wait()
+    (out / "sampling.txt").write_text(f"perf record -F {frequency} --call-graph {call_graph}, of "
+                                      f"{sampler.binary or 'nginx'}\n")
     data = run.work.path(f"perf-{proxy.kind}.data")
     data.unlink(missing_ok=True)
     sampled = out / "sampled"
     sampled.mkdir(exist_ok=True)
-    perf_during(proxy, run, ["record", "-F", str(PERF_FREQUENCY), "--call-graph", f"dwarf,{PERF_STACK_BYTES}",
-                             "-o", str(data)],
+    perf_during(sampler, run, ["record", "-F", str(frequency), "--call-graph", call_graph, "-o", str(data)],
                 out / "perf-record.log",
-                lambda: measure(proxy, run.layout, load, rate, options, sampled / f"{rate}-1.json"))
+                lambda: measure(sampler, run.layout, load, rate, options, sampled / f"{rate}-1.json"))
+    sampler.stop()
     proxy.stop()
     if not data.exists():
         print(f"    perf record wrote nothing, see {out / 'perf-record.log'}", flush=True)
@@ -1249,7 +1266,8 @@ def parse_cpus(text: str) -> list[int]:
 
 
 def command_build(_: argparse.Namespace) -> None:
-    """Builds the release binary once per allocator, into target/bench/."""
+    """Builds the release binary once per allocator, and on Linux once more with frame pointers
+    for scenario 9, into target/bench/."""
     BINARIES.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     if sys.platform.startswith("linux"):
@@ -1262,6 +1280,19 @@ def command_build(_: argparse.Namespace) -> None:
             sys.exit(f"cargo build failed with the {name} allocator; see its output above and the build "
                      "tools in benches/README.md")
         shutil.copy2(REPO / "target/release/wormway", BINARIES / f"wormway-{name}")
+    if sys.platform.startswith("linux"):
+        print("building with frame pointers, for scenario 9", flush=True)
+        env["RUSTFLAGS"] = f"{env['RUSTFLAGS']} {FRAME_FLAGS}"
+        # For the C code in the binary as well, the allocator above all.
+        env["CFLAGS"] = f"{env.get('CFLAGS', '')} -fno-omit-frame-pointer".strip()
+        # In a directory of its own: other flags in target/release would rebuild every crate
+        # there, now and for the next build without them.
+        target = REPO / "target" / f"bench-{FRAMES}"
+        built = subprocess.run(["cargo", "build", "--release", "--locked", "-p", "wormway", "--target-dir",
+                                str(target)], cwd=REPO, env=env)
+        if built.returncode != 0:
+            sys.exit("cargo build failed with frame pointers; see its output above")
+        shutil.copy2(target / "release/wormway", BINARIES / f"wormway-{FRAMES}")
     print(f"binaries in {BINARIES}")
 
 

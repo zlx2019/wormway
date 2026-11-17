@@ -24,7 +24,7 @@ How the performance of Wormway is measured, and the scripts that measure it agai
 
 | Script | Purpose |
 |---|---|
-| `bench.py` | Builds Wormway once per allocator, runs the scenarios against Wormway and Nginx, and summarizes the results as Markdown tables. Linux only; the Python standard library only. |
+| `bench.py` | Builds Wormway once per allocator and once for profiling, runs the scenarios against Wormway and Nginx, and summarizes the results as Markdown tables. Linux only; the Python standard library only. |
 | `env.sh` | Prints the environment of a run. |
 | `load.sh URL RATE [DURATION] [CONNECTIONS]` | Warms up, then sends HTTP requests to `URL` at `RATE` per second with [oha](https://github.com/hatoo/oha), and saves the latency report and the environment in `results/`. For a quick look at one setup. |
 
@@ -70,6 +70,13 @@ the most samples of their own (`self.txt`); and every sampled call stack in the 
 flame graphs, weighted by the CPU time of its samples (`stacks.folded`). Nginx from nginx.org ships
 without symbols, so most of its own functions show up as addresses.
 
+perf counts on the build that scenario 1 measures, and samples a build of Wormway with frame
+pointers, `target/bench/wormway-frames`: it walks those 1999 times a second, where unwinding
+with DWARF, as for Nginx and for a Wormway given with `--wormway`, means copying 64 KiB of every
+stack, at 199 samples a second. `sampling.txt` says which it was. A frame without a frame
+pointer of its own, such as the functions of the C library that make system calls, hides its
+caller; the stack above that is whole.
+
 ## On a Debian or Ubuntu server
 
 Install the build tools, cmake included (Pingora builds zlib-ng with it), and Nginx from
@@ -103,8 +110,13 @@ sudo apt install linux-tools-common linux-tools-$(uname -r)
 sudo sysctl kernel.perf_event_paranoid=1 kernel.kptr_restrict=0
 ```
 
-Build Wormway once per allocator, into `target/bench/`. The release profile links the whole
-program at once, which needs more than 2 GB of memory: on smaller machines, add a swap file for
+The kernel lowers `kernel.perf_event_max_sample_rate` when taking samples holds it up, as the
+stack copies of DWARF unwinding do, and keeps it low until the next reboot; `env.sh` prints it.
+`sudo sysctl kernel.perf_event_max_sample_rate=100000` restores the default.
+
+Build Wormway once per allocator, and once more with frame pointers for scenario 9, into
+`target/bench/`. The release profile links the whole program at once, which needs more than
+2 GB of memory: on smaller machines, add a swap file for
 the build, and remove it before measuring, so that swapping does not distort the memory figures.
 `build` links with `-z separate-code`: perf cannot unwind the stacks of Wormway in the default
 layout of rust-lld, the linker of Rust on x86-64 Linux since 1.90.
