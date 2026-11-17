@@ -278,7 +278,7 @@ impl ProxyHttp for Proxy {
         let now = Instant::now();
         ctx.upstream_started.get_or_insert(now);
         ctx.attempt_started = Some(now);
-        let peer = upstream.peer(&target, &route.timeouts);
+        let peer = upstream.peer(&target, &route.timeouts)?;
         ctx.tried.push(target);
         Ok(Box::new(peer))
     }

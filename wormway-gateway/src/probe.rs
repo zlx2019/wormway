@@ -74,7 +74,7 @@ impl Prober {
         target: &Backend,
     ) -> Result<(), String> {
         let connector = self.connector().await?;
-        let mut peer = connect.peer(target);
+        let mut peer = connect.peer(target).map_err(|error| describe(&error))?;
         // One stream per HTTP/2 connection keeps the connection out of the pool, so it closes
         // with the probe, as HTTP/1.1 connections that are not handed back do.
         peer.options.max_h2_streams = 1;

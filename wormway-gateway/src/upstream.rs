@@ -110,14 +110,18 @@ impl CompiledUpstream {
     }
 
     /// Returns the peer that sends a request of a route with time limits `route` to `target`.
-    pub(crate) fn peer(&self, target: &Backend, route: &RouteTimeouts) -> HttpPeer {
-        let mut peer = self.connect.peer(target);
+    pub(crate) fn peer(
+        &self,
+        target: &Backend,
+        route: &RouteTimeouts,
+    ) -> pingora::Result<HttpPeer> {
+        let mut peer = self.connect.peer(target)?;
         let options = &mut peer.options;
         options.total_connection_timeout = Some(self.timeouts.connect().get());
         options.read_timeout = Some(route.read.unwrap_or(self.timeouts.read()).get());
         options.write_timeout = Some(route.write.unwrap_or(self.timeouts.write()).get());
         options.idle_timeout = Some(self.timeouts.idle().get());
-        peer
+        Ok(peer)
     }
 }
 
@@ -135,14 +139,15 @@ impl Connect {
         Self { protocol, tls }
     }
 
-    /// Returns a peer that reaches `target`, without time limits.
-    pub(crate) fn peer(&self, target: &Backend) -> HttpPeer {
+    /// Returns a peer that reaches `target`, without time limits. Fails only for a target
+    /// without an address to connect to, which resolved targets have.
+    pub(crate) fn peer(&self, target: &Backend) -> pingora::Result<HttpPeer> {
         let sni = self
             .tls
             .as_ref()
             .map(|tls| tls.sni(target))
             .unwrap_or_default();
-        let mut peer = HttpPeer::new(target.clone(), false, sni);
+        let mut peer = HttpPeer::new(target.clone(), false, sni)?;
         if let Some(tls) = &self.tls {
             tls.configure(&mut peer);
         }
@@ -151,7 +156,7 @@ impl Connect {
             peer.options.alpn = ALPN::H2;
             peer.options.max_h2_streams = H2_STREAMS;
         }
-        peer
+        Ok(peer)
     }
 
     /// Whether the targets are reached over TLS.
