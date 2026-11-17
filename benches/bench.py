@@ -58,8 +58,9 @@ SECOND_UPSTREAM_PORT = 18082  # a second upstream, for scenario 6
 STATUS_PORT = 18089  # stub_status of the upstream
 WS_PORT = 18090  # the WebSocket upstream of scenario 5
 
-# WebSocket connections that scenario 5 holds, 1000 with --quick. Each takes two through the proxy.
-WS_CONNECTIONS = 10_000
+# Idle connections that scenarios 5 and 10 hold, 1000 with --quick. Each WebSocket connection
+# takes two through the proxy.
+IDLE_CONNECTIONS = 10_000
 
 # Latency above which a rate counts as too high, in seconds, and the share of errors.
 P99_LIMIT = 0.050
@@ -108,8 +109,8 @@ def raise_open_files() -> int:
         resource.setrlimit(resource.RLIMIT_NOFILE, (wanted, hard))
     soft, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
     # To standard error: the WebSocket clients of scenario 5 answer on standard output.
-    if soft < 2 * WS_CONNECTIONS + 1024:
-        print(f"warning: only {soft} open files allowed, scenario 5 needs about {2 * WS_CONNECTIONS + 1024}",
+    if soft < 2 * IDLE_CONNECTIONS + 1024:
+        print(f"warning: only {soft} open files allowed, scenario 5 needs about {2 * IDLE_CONNECTIONS + 1024}",
               file=sys.stderr, flush=True)
     return soft
 
@@ -815,44 +816,54 @@ def scenario_4(proxy: Proxy, run: Run) -> None:
 
 def scenario_5(proxy: Proxy, run: Run) -> None:
     """Memory of idle WebSocket connections: the growth of the resident memory of the proxy."""
-    count = 1000 if run.options.quick else WS_CONNECTIONS
-    settings = run.settings()
-    settings.worker_connections = max(settings.worker_connections, 2 * count + 1024)
-    out = run.out(5, proxy)
-    out.mkdir(parents=True, exist_ok=True)
     upstream = Process("ws-upstream", run.layout.pin(run.layout.tools, [sys.executable, __file__, "ws-upstream",
                                                                          str(WS_PORT)]),
                        run.work.path("ws-upstream.log"))
     wait_for_port(WS_PORT, upstream)
     try:
-        for repeat in range(1, run.options.repeats + 1):
-            print(f"    {count} connections, run {repeat}/{run.options.repeats}", flush=True)
-            proxy.start(settings)
-            time.sleep(2)
-            base = Usage.of(proxy.pid)
-            clients = subprocess.Popen(
-                run.layout.pin(run.layout.tools, [sys.executable, __file__, "ws-clients", str(HTTP_PORT),
-                                                  str(count)]),
-                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=clean_env())
-            ready = clients.stdout.readline().decode().strip() if clients.stdout else ""
-            time.sleep(5)
-            held = Usage.of(proxy.pid)
-            if clients.stdin:
-                clients.stdin.close()
-            clients.wait(30)
-            opened = int(ready.split()[1]) if ready.startswith("ready") else 0
-            result = {
-                "proxy": proxy.kind,
-                "connections": opened,
-                "wanted": count,
-                "base_rss_bytes": base.rss_bytes,
-                "held_rss_bytes": held.rss_bytes,
-                "per_connection_bytes": (held.rss_bytes - base.rss_bytes) / opened if opened else None,
-                "clients_stderr": clients.stderr.read().decode(errors="replace")[-2000:] if clients.stderr else "",
-            }
-            (out / f"{count}-{repeat}.json").write_text(json.dumps(result, indent=1))
+        hold_connections(proxy, run, run.out(5, proxy), "ws-clients")
     finally:
         upstream.stop()
+
+
+def scenario_10(proxy: Proxy, run: Run) -> None:
+    """Memory of idle keep-alive connections: the growth of the resident memory of the proxy."""
+    hold_connections(proxy, run, run.out(10, proxy), "keepalive-clients")
+
+
+def hold_connections(proxy: Proxy, run: Run, out: Path, clients_command: str) -> None:
+    """Records in `out` the resident memory of the proxy before and while `clients_command` of this
+    script holds idle connections through it, the proxy started anew for each repeat."""
+    count = 1000 if run.options.quick else IDLE_CONNECTIONS
+    settings = run.settings()
+    settings.worker_connections = max(settings.worker_connections, 2 * count + 1024)
+    out.mkdir(parents=True, exist_ok=True)
+    for repeat in range(1, run.options.repeats + 1):
+        print(f"    {count} connections, run {repeat}/{run.options.repeats}", flush=True)
+        proxy.start(settings)
+        time.sleep(2)
+        base = Usage.of(proxy.pid)
+        clients = subprocess.Popen(
+            run.layout.pin(run.layout.tools, [sys.executable, __file__, clients_command, str(HTTP_PORT),
+                                              str(count)]),
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=clean_env())
+        ready = clients.stdout.readline().decode().strip() if clients.stdout else ""
+        time.sleep(5)
+        held = Usage.of(proxy.pid)
+        if clients.stdin:
+            clients.stdin.close()
+        clients.wait(30)
+        opened = int(ready.split()[1]) if ready.startswith("ready") else 0
+        result = {
+            "proxy": proxy.kind,
+            "connections": opened,
+            "wanted": count,
+            "base_rss_bytes": base.rss_bytes,
+            "held_rss_bytes": held.rss_bytes,
+            "per_connection_bytes": (held.rss_bytes - base.rss_bytes) / opened if opened else None,
+            "clients_stderr": clients.stderr.read().decode(errors="replace")[-2000:] if clients.stderr else "",
+        }
+        (out / f"{count}-{repeat}.json").write_text(json.dumps(result, indent=1))
 
 
 def scenario_6(proxy: Proxy, run: Run) -> None:
@@ -1083,7 +1094,7 @@ def profile(proxy: Proxy, run: Run, settings: Settings, out: Path) -> None:
 
 
 SCENARIOS = {1: scenario_1, 2: scenario_2, 3: scenario_3, 4: scenario_4, 5: scenario_5, 6: scenario_6,
-             7: scenario_7, 8: scenario_8, 9: scenario_9}
+             7: scenario_7, 8: scenario_8, 9: scenario_9, 10: scenario_10}
 
 
 # ---- Variants of Wormway alone ----
@@ -1091,12 +1102,12 @@ SCENARIOS = {1: scenario_1, 2: scenario_2, 3: scenario_3, 4: scenario_4, 5: scen
 
 def variants(run: Run, wormway: Proxy, scenarios: list[int]) -> None:
     """Wormway with other settings or allocators, against its defaults, on those of `scenarios`
-    that each needs: allocators on scenarios 1, 4 and 5; backlog 128 on scenario 3; the default
+    that each needs: allocators on scenarios 1, 4, 5 and 10; backlog 128 on scenario 3; the default
     pool of idle upstream connections against a pool of one per thread, both with 256
     connections; upstreams over HTTP/2; and with 4 CPUs or more, threads and reuseport."""
     allocators = [name for name in list(ALLOCATORS)[1:] if (BINARIES / f"wormway-{name}").exists()]
     for name in allocators:
-        numbers = [number for number in (1, 4, 5) if number in scenarios]
+        numbers = [number for number in (1, 4, 5, 10) if number in scenarios]
         if not numbers:
             break
         print(f"  allocator {name}", flush=True)
@@ -1316,7 +1327,7 @@ def summarize(out: Path) -> str:
     for scenario in sorted(results.glob("scenario-*"), key=lambda path: int(path.name.split("-")[1])):
         number = int(scenario.name.split("-")[1])
         lines += [f"## Scenario {number}: {SCENARIOS[number].__doc__.splitlines()[0]}", ""]
-        if number == 5:
+        if number in (5, 10):
             lines += memory_table(scenario)
         elif number == 9:
             lines += profile_table(scenario)
@@ -1458,23 +1469,30 @@ async def ws_upstream(port: int) -> None:
         await server.serve_forever()
 
 
-async def ws_clients(port: int, count: int) -> None:
-    """Opens `count` WebSocket connections through the proxy on loopback `port`, prints `ready N`
-    once they are open, and holds them until standard input closes."""
+WS_REQUEST = (b"GET /ws HTTP/1.1\r\nHost: bench.local\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+              b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n")
+KEEPALIVE_REQUEST = b"GET / HTTP/1.1\r\nHost: bench.local\r\nUser-Agent: bench\r\nAccept: */*\r\n\r\n"
+
+
+async def hold_clients(port: int, count: int, request: bytes, status: bytes) -> None:
+    """Opens `count` connections through the proxy on loopback `port`, sends `request` on each
+    and reads its response, which has to have `status`, prints `ready N` once that is done, and
+    holds the connections until standard input closes."""
     writers: list[asyncio.StreamWriter] = []
     failures: list[str] = []
-    request = (b"GET /ws HTTP/1.1\r\nHost: bench.local\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
-               b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n")
 
     async def open_one() -> None:
-        """Opens one connection and waits for its 101."""
+        """Opens one connection and reads its response, with the body that it announces."""
         reader, writer = await asyncio.open_connection("127.0.0.1", port)
         writer.write(request)
         await writer.drain()
         head = await reader.readuntil(b"\r\n\r\n")
-        if not head.startswith(b"HTTP/1.1 101"):
+        if not head.startswith(b"HTTP/1.1 " + status):
             writer.close()
             raise ConnectionError(head.split(b"\r\n")[0].decode(errors="replace"))
+        length = re.search(rb"(?i)\r\ncontent-length:\s*(\d+)", head)
+        if length:
+            await reader.readexactly(int(length[1]))
         writers.append(writer)
 
     async def open_in_time() -> None:
@@ -1527,17 +1545,19 @@ def main() -> None:
     soak.add_argument("--out")
     upstream = commands.add_parser("ws-upstream")
     upstream.add_argument("port", type=int)
-    clients = commands.add_parser("ws-clients")
-    clients.add_argument("port", type=int)
-    clients.add_argument("count", type=int)
+    for name in ("ws-clients", "keepalive-clients"):
+        clients = commands.add_parser(name)
+        clients.add_argument("port", type=int)
+        clients.add_argument("count", type=int)
     args = parser.parse_args()
 
     if args.command == "ws-upstream":
         asyncio.run(ws_upstream(args.port))
         return
-    if args.command == "ws-clients":
+    if args.command in ("ws-clients", "keepalive-clients"):
         raise_open_files()
-        asyncio.run(ws_clients(args.port, args.count))
+        request, status = (WS_REQUEST, b"101") if args.command == "ws-clients" else (KEEPALIVE_REQUEST, b"200")
+        asyncio.run(hold_clients(args.port, args.count, request, status))
         return
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(1))
     try:

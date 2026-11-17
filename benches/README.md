@@ -48,12 +48,13 @@ sets the headers that Wormway tells every upstream about the client with: `X-Rea
 | 7 | Features turned on one by one: request headers, rate limit, API key, JSON and combined access logs, all | 5000 and 10000 per second |
 | 8 | A configuration change every second, SIGHUP for both | 5000 per second for 40 seconds, against the same load without changes |
 | 9 | Where the CPU time goes, with `perf`: counters per request, then sampled call stacks | 10000 per second as in scenario 1, with one thread or worker and with one per CPU; skipped without `perf` |
+| 10 | Memory of 10000 idle keep-alive connections, each after one request | resident memory before and while they are held |
 
 A rate ladder stops at the first rate where the proxy falls more than 10% behind, p99 passes
 50 ms, or more than 1% of the requests fail.
 
 Then Wormway alone, against its defaults: the system and mimalloc allocators on scenarios 1,
-4 and 5; a backlog of 128 on scenario 3; the default pool of idle upstream connections against a
+4, 5 and 10; a backlog of 128 on scenario 3; the default pool of idle upstream connections against a
 pool of one per thread, both with 256 connections; upstreams over h2c and over HTTP/2 with TLS on
 scenario 1; and, with at least two CPUs for the proxy, one thread against several and
 `reuseport`. `--scenarios` selects the variants too.
@@ -147,7 +148,7 @@ every minute, to compare the allocators over a long run.
   22.04 and 24.04), when the client offers it.
 - Wormway keeps a pool of idle upstream connections per listener; Nginx one per worker process.
 - Nginx allocates the connections of each worker up front, about 450 bytes each, so its resident
-  memory grows with `worker_connections`: 4096, enough for every scenario but the fifth, which
-  raises it to what its connections need.
+  memory grows with `worker_connections`: 4096, enough for every scenario but the fifth and the
+  tenth, which raise it to what their connections need.
 - Nginx closes HTTP/2 connections after `keepalive_requests` too, and oha fails the requests in
   flight then, so the TLS server of Nginx has no such limit, as Wormway has none for HTTP/2.
