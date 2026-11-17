@@ -457,11 +457,20 @@ def nginx_proxy_config(work: Work, settings: Settings) -> str:
         route_extra.append("limit_req zone=bench burst=1000000 nodelay;")
     if "apikey" in settings.features:
         route_extra.append(f'if ($http_x_api_key != "{API_KEY}") {{ return 401; }}')
+    # What Wormway tells every upstream about the client, so that both proxies do the same work.
+    forwarded = [
+        "            proxy_set_header X-Real-IP $remote_addr;",
+        "            proxy_set_header X-Forwarded-For $remote_addr;",
+        "            proxy_set_header X-Forwarded-Proto $scheme;",
+        "            proxy_set_header X-Forwarded-Host $http_host;",
+        "            proxy_set_header X-Request-Id $request_id;",
+    ]
     locations = [
         "        location / {",
         "            proxy_pass http://app;",
         "            proxy_http_version 1.1;",
         '            proxy_set_header Connection "";',
+        *forwarded,
         "            proxy_next_upstream error timeout;",
         "            proxy_next_upstream_tries 2;",
         f'            add_header X-Bench-Generation "{settings.generation}";',
@@ -472,6 +481,7 @@ def nginx_proxy_config(work: Work, settings: Settings) -> str:
         "            proxy_http_version 1.1;",
         "            proxy_set_header Upgrade $http_upgrade;",
         '            proxy_set_header Connection "upgrade";',
+        *forwarded,
         "            proxy_read_timeout 1h;",
         "        }",
     ]

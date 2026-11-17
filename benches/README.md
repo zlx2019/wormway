@@ -33,7 +33,9 @@ How the performance of Wormway is measured, and the scripts that measure it agai
 ## Scenarios
 
 The upstream is a separate Nginx that answers `ok` on `/` and 1 MiB on `/1m`, kept alive by
-both proxies. Both proxies leave their access logs off unless a scenario turns them on.
+both proxies. Both proxies leave their access logs off unless a scenario turns them on. Nginx
+sets the headers that Wormway tells every upstream about the client with: `X-Real-IP`,
+`X-Forwarded-For`, `X-Forwarded-Proto`, `X-Forwarded-Host` and `X-Request-Id`.
 
 | # | Scenario | Load |
 |---|---|---|
